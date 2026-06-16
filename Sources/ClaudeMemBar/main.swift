@@ -82,53 +82,67 @@ enum Theme {
 
 // MARK: - Action tile
 
-final class ActionTile: NSButton {
-    var tint: NSColor = .labelColor {
-        didSet { applyTitle() }
-    }
-    private var titleText: String = ""
+final class ActionTile: NSView {
+    private weak var target: AnyObject?
+    private let action: Selector
+    private let iconView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "")
+    private var isHovered = false
 
     init(title: String, symbol: String, tint: NSColor, target: AnyObject, action: Selector) {
-        super.init(frame: .zero)
-        self.titleText = title
-        self.tint = tint
         self.target = target
         self.action = action
-        self.title = ""
-        isBordered = false
-        imagePosition = .imageAbove
-        imageScaling = .scaleProportionallyDown
+        super.init(frame: .zero)
+
         wantsLayer = true
         layer?.cornerRadius = 10
         layer?.cornerCurve = .continuous
         layer?.backgroundColor = Theme.controlFill.cgColor
-        contentTintColor = tint
+
         let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
-        image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
+        iconView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
             .withSymbolConfiguration(config)
-        applyTitle()
+        iconView.contentTintColor = tint
+        iconView.imageScaling = .scaleProportionallyDown
+        iconView.setContentHuggingPriority(.required, for: .horizontal)
+        iconView.setContentHuggingPriority(.required, for: .vertical)
+
+        titleLabel.stringValue = title
+        titleLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        titleLabel.textColor = tint
+        titleLabel.alignment = .center
+
+        let stack = NSStackView(views: [iconView, titleLabel])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 3
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
         translatesAutoresizingMaskIntoConstraints = false
-        heightAnchor.constraint(equalToConstant: 50).isActive = true
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 50),
+            stack.centerXAnchor.constraint(equalTo: centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    private func applyTitle() {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        attributedTitle = NSAttributedString(string: titleText, attributes: [
-            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
-            .foregroundColor: tint,
-            .paragraphStyle: paragraph
-        ])
+    private func applyBackground() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = (isHovered ? Theme.controlHover : Theme.controlFill).cgColor
+        }
     }
 
-    override func updateLayer() {
-        super.updateLayer()
-        layer?.backgroundColor = (isHovered ? Theme.controlHover : Theme.controlFill).cgColor
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyBackground()
     }
 
-    private var isHovered = false
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -143,12 +157,26 @@ final class ActionTile: NSButton {
 
     override func mouseEntered(with event: NSEvent) {
         isHovered = true
-        layer?.backgroundColor = Theme.controlHover.cgColor
+        applyBackground()
     }
 
     override func mouseExited(with event: NSEvent) {
         isHovered = false
-        layer?.backgroundColor = Theme.controlFill.cgColor
+        applyBackground()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        isHovered = true
+        applyBackground()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let inside = bounds.contains(convert(event.locationInWindow, from: nil))
+        isHovered = inside
+        applyBackground()
+        if inside, let target {
+            NSApp.sendAction(action, to: target, from: self)
+        }
     }
 }
 
