@@ -31,14 +31,37 @@ struct Counts {
     var lastCreatedAt: String?
 }
 
+final class ToolbarButton: NSButton {
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        layer?.backgroundColor = NSColor(calibratedRed: 0.875, green: 0.886, blue: 0.910, alpha: 1.0).cgColor
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        layer?.backgroundColor = NSColor(calibratedRed: 0.925, green: 0.932, blue: 0.948, alpha: 1.0).cgColor
+    }
+}
+
 final class DashboardWindowController: NSWindowController {
-    private let panelWidth: CGFloat = 390
-    private let panelHeight: CGFloat = 520
-    private let accent = NSColor(calibratedRed: 0.39, green: 0.20, blue: 0.92, alpha: 1.0)
-    private let accentSoft = NSColor(calibratedRed: 0.91, green: 0.88, blue: 1.0, alpha: 0.9)
-    private let cardBackground = NSColor(calibratedRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.86)
-    private let mutedText = NSColor(calibratedRed: 0.42, green: 0.46, blue: 0.54, alpha: 1.0)
-    private let darkText = NSColor(calibratedRed: 0.07, green: 0.10, blue: 0.17, alpha: 1.0)
+    private let panelWidth: CGFloat = 376
+    private let panelHeight: CGFloat = 506
+    private let accent = NSColor(calibratedRed: 0.41, green: 0.24, blue: 0.90, alpha: 1.0)
+    private let accentSoft = NSColor(calibratedRed: 0.93, green: 0.90, blue: 1.0, alpha: 1.0)
+    private let panelBackground = NSColor(calibratedRed: 0.965, green: 0.972, blue: 0.985, alpha: 0.98)
+    private let cardBackground = NSColor(calibratedRed: 0.995, green: 0.997, blue: 1.0, alpha: 0.96)
+    private let controlBackground = NSColor(calibratedRed: 0.925, green: 0.932, blue: 0.948, alpha: 1.0)
+    private let mutedText = NSColor(calibratedRed: 0.43, green: 0.47, blue: 0.56, alpha: 1.0)
+    private let darkText = NSColor(calibratedRed: 0.075, green: 0.095, blue: 0.15, alpha: 1.0)
 
     private let statusDot = NSView()
     private let statusPillView = NSView()
@@ -173,21 +196,23 @@ final class DashboardWindowController: NSWindowController {
         logsSelector: Selector,
         quitSelector: Selector
     ) -> NSView {
-        let root = NSVisualEffectView()
-        root.material = .popover
-        root.blendingMode = .behindWindow
-        root.state = .active
+        let root = NSView()
         root.wantsLayer = true
+        root.layer?.backgroundColor = panelBackground.cgColor
         root.layer?.cornerRadius = 18
         root.layer?.cornerCurve = .continuous
-        root.layer?.borderColor = NSColor.white.withAlphaComponent(0.75).cgColor
+        root.layer?.borderColor = NSColor(calibratedWhite: 0.76, alpha: 0.72).cgColor
         root.layer?.borderWidth = 1
+        root.layer?.shadowColor = NSColor.black.cgColor
+        root.layer?.shadowOpacity = 0.20
+        root.layer?.shadowRadius = 24
+        root.layer?.shadowOffset = CGSize(width: 0, height: -8)
 
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 16, left: 18, bottom: 16, right: 18)
+        stack.spacing = 9
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
         stack.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(stack)
 
@@ -216,13 +241,13 @@ final class DashboardWindowController: NSWindowController {
     }
 
     private func header() -> NSView {
-        let icon = iconTile(symbol: "brain.head.profile", size: 42, symbolSize: 25)
+        let icon = iconTile(symbol: "brain.head.profile", size: 40, symbolSize: 24)
 
-        let title = label("ClaudeMem 监控", size: 19, weight: .bold)
+        let title = label("ClaudeMem 监控", size: 20, weight: .bold)
         title.textColor = darkText
         title.maximumNumberOfLines = 1
 
-        let subtitle = label("状态、记忆和常用入口", size: 12, weight: .regular)
+        let subtitle = label("状态、记忆和常用入口", size: 12, weight: .medium)
         subtitle.textColor = mutedText
         subtitle.maximumNumberOfLines = 1
 
@@ -237,8 +262,8 @@ final class DashboardWindowController: NSWindowController {
         row.spacing = 12
         row.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            row.widthAnchor.constraint(equalToConstant: panelWidth - 36),
-            row.heightAnchor.constraint(equalToConstant: 42)
+            row.widthAnchor.constraint(equalToConstant: panelWidth - 32),
+            row.heightAnchor.constraint(equalToConstant: 44)
         ])
         return row
     }
@@ -250,10 +275,10 @@ final class DashboardWindowController: NSWindowController {
         top.distribution = .equalSpacing
         top.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            top.widthAnchor.constraint(equalToConstant: panelWidth - 68)
+            top.widthAnchor.constraint(equalToConstant: panelWidth - 62)
         ])
 
-        workerValue.font = .systemFont(ofSize: 12, weight: .medium)
+        workerValue.font = .systemFont(ofSize: 12, weight: .semibold)
         workerValue.textColor = darkText
         workerValue.maximumNumberOfLines = 1
         workerValue.lineBreakMode = .byTruncatingTail
@@ -266,8 +291,8 @@ final class DashboardWindowController: NSWindowController {
         let body = NSStackView(views: [top, workerValue, aiValue])
         body.orientation = .vertical
         body.alignment = .leading
-        body.spacing = 5
-        return sectionCard(title: "运行状态", symbol: "cpu", content: body, height: 106)
+        body.spacing = 6
+        return sectionCard(title: "运行状态", symbol: "cpu", content: body, height: 104)
     }
 
     private func memorySection() -> NSView {
@@ -278,8 +303,8 @@ final class DashboardWindowController: NSWindowController {
         ])
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.spacing = 8
-        return sectionCard(title: "记忆概览", symbol: "externaldrive.connected.to.line.below", content: row, height: 86, highlighted: true)
+        row.spacing = 6
+        return sectionCard(title: "记忆概览", symbol: "externaldrive.connected.to.line.below", content: row, height: 84, highlighted: true)
     }
 
     private func contentSection() -> NSView {
@@ -328,7 +353,7 @@ final class DashboardWindowController: NSWindowController {
         body.orientation = .vertical
         body.alignment = .leading
         body.spacing = 8
-        return sectionCard(title: "快捷入口", symbol: "square.grid.2x2", content: body, height: 112)
+        return sectionCard(title: "快捷入口", symbol: "square.grid.2x2", content: body, height: 110)
     }
 
     private func statusPill() -> NSView {
@@ -355,7 +380,7 @@ final class DashboardWindowController: NSWindowController {
         pill.addSubview(row)
 
         NSLayoutConstraint.activate([
-            pill.widthAnchor.constraint(equalToConstant: 86),
+            pill.widthAnchor.constraint(equalToConstant: 84),
             pill.heightAnchor.constraint(equalToConstant: 26),
             row.centerXAnchor.constraint(equalTo: pill.centerXAnchor),
             row.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
@@ -386,8 +411,12 @@ final class DashboardWindowController: NSWindowController {
         container.layer?.cornerRadius = 13
         container.layer?.cornerCurve = .continuous
         container.layer?.backgroundColor = cardBackground.cgColor
-        container.layer?.borderColor = (highlighted ? accent.withAlphaComponent(0.65) : NSColor(calibratedWhite: 0.82, alpha: 0.74)).cgColor
-        container.layer?.borderWidth = highlighted ? 1.2 : 1
+        container.layer?.borderColor = (highlighted ? accent.withAlphaComponent(0.62) : NSColor(calibratedWhite: 0.82, alpha: 0.82)).cgColor
+        container.layer?.borderWidth = highlighted ? 1.25 : 1
+        container.layer?.shadowColor = NSColor.black.cgColor
+        container.layer?.shadowOpacity = highlighted ? 0.07 : 0.055
+        container.layer?.shadowRadius = highlighted ? 10 : 8
+        container.layer?.shadowOffset = CGSize(width: 0, height: -3)
         container.translatesAutoresizingMaskIntoConstraints = false
 
         let titleLabel = label(title, size: 12, weight: .semibold)
@@ -401,13 +430,13 @@ final class DashboardWindowController: NSWindowController {
         let stack = NSStackView(views: [titleRow, content])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 10, left: 13, bottom: 10, right: 13)
+        stack.spacing = 7
+        stack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
         stack.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(stack)
 
         NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: panelWidth - 36),
+            container.widthAnchor.constraint(equalToConstant: panelWidth - 32),
             container.heightAnchor.constraint(equalToConstant: height),
             stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
@@ -419,7 +448,7 @@ final class DashboardWindowController: NSWindowController {
     }
 
     private func metricTile(title: String, value: NSTextField) -> NSView {
-        value.font = .systemFont(ofSize: 24, weight: .bold)
+        value.font = .systemFont(ofSize: 25, weight: .bold)
         value.textColor = accent
         value.alignment = .center
 
@@ -433,7 +462,7 @@ final class DashboardWindowController: NSWindowController {
         stack.spacing = 1
         stack.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            stack.widthAnchor.constraint(equalToConstant: 103),
+            stack.widthAnchor.constraint(equalToConstant: 100),
             stack.heightAnchor.constraint(equalToConstant: 50)
         ])
         return stack
@@ -453,7 +482,7 @@ final class DashboardWindowController: NSWindowController {
         row.spacing = 10
         row.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            row.widthAnchor.constraint(equalToConstant: panelWidth - 68)
+            row.widthAnchor.constraint(equalToConstant: panelWidth - 62)
         ])
         return row
     }
@@ -462,21 +491,25 @@ final class DashboardWindowController: NSWindowController {
         let row = NSStackView(views: buttons)
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.spacing = 8
+        row.spacing = 7
         return row
     }
 
     private func actionButton(_ title: String, symbol symbolName: String, target: AnyObject, action: Selector) -> NSButton {
-        let button = NSButton(title: title, target: target, action: action)
-        button.bezelStyle = .rounded
-        button.controlSize = .small
-        button.font = .systemFont(ofSize: 12, weight: .medium)
-        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: title)
+        let button = ToolbarButton(title: title, target: target, action: action)
+        button.font = .systemFont(ofSize: 12, weight: .semibold)
+        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: title)?.withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
         button.imagePosition = .imageLeading
-        button.contentTintColor = accent
+        button.imageHugsTitle = false
+        button.contentTintColor = darkText
+        button.wantsLayer = true
+        button.layer?.backgroundColor = controlBackground.cgColor
+        button.layer?.cornerRadius = 7
+        button.layer?.cornerCurve = .continuous
+        button.isBordered = false
         button.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 108),
+            button.widthAnchor.constraint(equalToConstant: 103),
             button.heightAnchor.constraint(equalToConstant: 28)
         ])
         return button
@@ -510,7 +543,7 @@ final class DashboardWindowController: NSWindowController {
         line.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.7).cgColor
         line.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            line.widthAnchor.constraint(equalToConstant: panelWidth - 68),
+            line.widthAnchor.constraint(equalToConstant: panelWidth - 62),
             line.heightAnchor.constraint(equalToConstant: 1)
         ])
         return line
