@@ -5,7 +5,20 @@ private let appName = "ClaudeMemBar"
 private let webURL = URL(string: "http://127.0.0.1:37701")!
 private let healthURL = URL(string: "http://127.0.0.1:37701/api/health")!
 private let databasePath = NSString(string: "~/.claude-mem/claude-mem.db").expandingTildeInPath
+private let settingsPath = NSString(string: "~/.claude-mem/settings.json").expandingTildeInPath
+private let pluginMarkerPath = NSString(string: "~/.claude/plugins/marketplaces/thedotmack").expandingTildeInPath
 private let logsURL = URL(fileURLWithPath: NSString(string: "~/.claude-mem/logs").expandingTildeInPath)
+private let claudeMemRepoURL = URL(string: "https://github.com/thedotmack/claude-mem")!
+private let nodeDownloadURL = URL(string: "https://nodejs.org/zh-cn/download")!
+private let workerLabel = "com.claude-mem.worker"
+
+// GitHub 热更新：版本/源码均来自用户自己的 public 仓库（HTTPS，固定指向）
+private let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0.0"
+private let rawVersionURL = URL(string: "https://raw.githubusercontent.com/AliceDel66/ClaudeMemBar/main/VERSION")!
+private let tarballURL = URL(string: "https://github.com/AliceDel66/ClaudeMemBar/archive/refs/heads/main.tar.gz")!
+private let repoWebURL = URL(string: "https://github.com/AliceDel66/ClaudeMemBar")!
+private let ignoredVersionKey = "ignoredUpdateVersion"
+private let languageDefaultAppliedKey = "cmb.languageDefaultApplied"
 
 // MARK: - Data
 
@@ -31,6 +44,54 @@ struct Counts {
     var projects: [String] = []
     var lastTitle: String?
     var lastCreatedAt: String?
+}
+
+// 详情列表条目（由 `sqlite3 -json` 解码，字段名对应表列名）
+struct MemoryItem: Decodable {
+    let id: Int
+    let title: String?
+    let subtitle: String?
+    let project: String?
+    let type: String?
+    let narrative: String?
+    let facts: String?
+    let concepts: String?
+    let files_read: String?
+    let files_modified: String?
+    let text: String?
+    let created_at_epoch: Int?
+}
+
+struct SummaryItem: Decodable {
+    let id: Int
+    let project: String?
+    let request: String?
+    let investigated: String?
+    let learned: String?
+    let completed: String?
+    let next_steps: String?
+    let created_at_epoch: Int?
+}
+
+enum DetailKind {
+    case memories
+    case summaries
+
+    var title: String { self == .memories ? "记忆" : "摘要" }
+    var symbol: String { self == .memories ? "brain.head.profile" : "doc.text.magnifyingglass" }
+}
+
+enum Language: Int {
+    case chinese = 0
+    case english = 1
+}
+
+enum UpdateUIState {
+    case available(String)
+    case downloading
+    case building
+    case installing
+    case failed
 }
 
 // MARK: - Theme
@@ -129,6 +190,11 @@ final class ActionTile: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    // 整块磁贴作为单一点击目标，避免图标/文字子视图吞掉点击
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        super.hitTest(point) == nil ? nil : self
+    }
+
     private func applyBackground() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             layer?.backgroundColor = (isHovered ? Theme.controlHover : Theme.controlFill).cgColor
@@ -180,6 +246,77 @@ final class ActionTile: NSView {
     }
 }
 
+// MARK: - Clickable view
+
+final class ClickableView: NSView {
+    var onClick: (() -> Void)?
+    var normalFill: NSColor?
+    var hoverFill: NSColor?
+    private var isHovered = false
+
+    func styled(corner: CGFloat, fill: NSColor?, hover: NSColor?) {
+        wantsLayer = true
+        layer?.cornerRadius = corner
+        layer?.cornerCurve = .continuous
+        normalFill = fill
+        hoverFill = hover
+        applyFill()
+    }
+
+    // 整块作为单一点击目标（仅用于纯展示内容的可点视图）
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        super.hitTest(point) == nil ? nil : self
+    }
+
+    private func applyFill() {
+        guard let normalFill else { return }
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = (isHovered ? (hoverFill ?? normalFill) : normalFill).cgColor
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyFill()
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        applyFill()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        applyFill()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let inside = bounds.contains(convert(event.locationInWindow, from: nil))
+        isHovered = inside
+        applyFill()
+        if inside { onClick?() }
+    }
+}
+
+final class FlippedStack: NSStackView {
+    override var isFlipped: Bool { true }
+}
+
 // MARK: - Dashboard
 
 final class DashboardWindowController: NSWindowController {
@@ -204,6 +341,49 @@ final class DashboardWindowController: NSWindowController {
     private let projectsValue = NSTextField(labelWithString: "暂无")
     private let latestValue = NSTextField(labelWithString: "暂无")
     private let updatedValue = NSTextField(labelWithString: "--")
+
+    private let languageSegment = NSSegmentedControl(
+        labels: ["中文", "English"],
+        trackingMode: .selectOne,
+        target: nil,
+        action: nil
+    )
+
+    // 内容切换（看板 ⇄ 列表 ⇄ 单条详情 ⇄ 安装引导）
+    private let container = NSView()
+    private let blurView = NSVisualEffectView()
+    private var dashboardView: NSView!
+    private var currentContent: NSView?
+    private weak var anchorButton: NSStatusBarButton?
+    private let detailHeight: CGFloat = 480
+    private var detailContentWidth: CGFloat { panelWidth - 40 }
+
+    // 列表异步加载状态
+    private var currentListKind: DetailKind?
+    private var listToken = 0
+
+    // 安装引导视图（按需构建一次，进度原地更新）
+    private var setupView: NSView?
+    private let setupMessageLabel = NSTextField(wrappingLabelWithString: "")
+    private let setupSpinner = NSProgressIndicator()
+    private let setupRetryButton = NSButton()
+    private let setupManualButton = NSButton()
+
+    // 数据与回调（由 AppDelegate 注入）
+    var memoriesProvider: (@escaping ([MemoryItem]) -> Void) -> Void = { $0([]) }
+    var summariesProvider: (@escaping ([SummaryItem]) -> Void) -> Void = { $0([]) }
+    var onOpenWeb: () -> Void = {}
+    var onStartUpdate: () -> Void = {}
+    var onDismissUpdate: () -> Void = {}
+    var onRetryInstall: () -> Void = {}
+    var languageProvider: () -> Int = { 0 }
+    var onSelectLanguage: (Int) -> Void = { _ in }
+
+    // 更新横幅（普通容器：内部按钮需要独立接收点击）
+    private let updateBanner = NSView()
+    private let updateBannerLabel = NSTextField(labelWithString: "")
+    private let updateActionButton = NSButton()
+    private let updateDismissButton = NSButton()
 
     init(
         actionTarget: AnyObject,
@@ -232,7 +412,8 @@ final class DashboardWindowController: NSWindowController {
 
         super.init(window: panel)
 
-        let root = buildContent(
+        buildContainer()
+        dashboardView = buildDashboard(
             actionTarget: actionTarget,
             openSelector: openSelector,
             copySelector: copySelector,
@@ -241,9 +422,8 @@ final class DashboardWindowController: NSWindowController {
             logsSelector: logsSelector,
             quitSelector: quitSelector
         )
-        panel.contentView = root
-        root.layoutSubtreeIfNeeded()
-        panel.setContentSize(root.fittingSize)
+        panel.contentView = container
+        showDashboard()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -257,8 +437,9 @@ final class DashboardWindowController: NSWindowController {
     }
 
     func show(health: Health?, counts: Counts, refreshedAt: Date, relativeTo button: NSStatusBarButton) {
+        anchorButton = button
         update(health: health, counts: counts, refreshedAt: refreshedAt)
-        position(relativeTo: button)
+        showDashboard()
         window?.orderFrontRegardless()
     }
 
@@ -308,6 +489,8 @@ final class DashboardWindowController: NSWindowController {
             latestValue.stringValue = "暂无记忆，请确认 Claude Code 已登录"
         }
 
+        languageSegment.selectedSegment = languageProvider()
+
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
         updatedValue.stringValue = "更新于 \(formatter.string(from: refreshedAt))"
@@ -333,16 +516,7 @@ final class DashboardWindowController: NSWindowController {
 
     // MARK: Build
 
-    private func buildContent(
-        actionTarget: AnyObject,
-        openSelector: Selector,
-        copySelector: Selector,
-        refreshSelector: Selector,
-        restartSelector: Selector,
-        logsSelector: Selector,
-        quitSelector: Selector
-    ) -> NSView {
-        let container = NSView()
+    private func buildContainer() {
         container.wantsLayer = true
         container.layer?.cornerRadius = 16
         container.layer?.cornerCurve = .continuous
@@ -351,37 +525,43 @@ final class DashboardWindowController: NSWindowController {
         container.layer?.borderWidth = 1
         container.translatesAutoresizingMaskIntoConstraints = false
 
-        let blur = NSVisualEffectView()
-        blur.material = .popover
-        blur.blendingMode = .behindWindow
-        blur.state = .active
-        blur.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(blur)
+        blurView.material = .popover
+        blurView.blendingMode = .behindWindow
+        blurView.state = .active
+        blurView.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(blurView)
 
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(equalToConstant: panelWidth),
+            blurView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            blurView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            blurView.topAnchor.constraint(equalTo: container.topAnchor),
+            blurView.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        ])
+    }
+
+    private func buildDashboard(
+        actionTarget: AnyObject,
+        openSelector: Selector,
+        copySelector: Selector,
+        refreshSelector: Selector,
+        restartSelector: Selector,
+        logsSelector: Selector,
+        quitSelector: Selector
+    ) -> NSView {
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 13
         stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 14, right: 16)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(stack)
-
-        NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: panelWidth),
-            blur.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            blur.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            blur.topAnchor.constraint(equalTo: container.topAnchor),
-            blur.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: container.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor)
-        ])
 
         stack.addArrangedSubview(header())
+        stack.addArrangedSubview(buildUpdateBanner())
         stack.addArrangedSubview(statsCard())
         stack.addArrangedSubview(runtimeCard())
         stack.addArrangedSubview(activityCard())
+        stack.addArrangedSubview(languageCard())
         stack.addArrangedSubview(actionsCard(
             target: actionTarget,
             openSelector: openSelector,
@@ -392,8 +572,832 @@ final class DashboardWindowController: NSWindowController {
             quitSelector: quitSelector
         ))
         stack.addArrangedSubview(footer())
+        return stack
+    }
 
-        return container
+    // MARK: Navigation
+
+    func showDashboard() {
+        if currentContent === dashboardView {
+            relayout()
+        } else {
+            swapContent(dashboardView)
+        }
+    }
+
+    private func swapContent(_ view: NSView) {
+        currentContent?.removeFromSuperview()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            view.topAnchor.constraint(equalTo: container.topAnchor),
+            view.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        ])
+        currentContent = view
+        relayout()
+    }
+
+    private func relayout() {
+        container.layoutSubtreeIfNeeded()
+        if let size = container.fittingSize as NSSize?, size.height > 0 {
+            window?.setContentSize(size)
+        }
+        if let anchorButton {
+            position(relativeTo: anchorButton)
+        }
+    }
+
+    // MARK: Setup / install flow
+
+    /// 显示安装引导（首次或缺失 claude-mem 时）。进度更新调用 updateSetup。
+    func showSetup(message: String, isError: Bool, relativeTo button: NSStatusBarButton? = nil) {
+        if let button { anchorButton = button }
+        if setupView == nil { setupView = buildSetup() }
+        applySetup(message: message, isError: isError)
+        if currentContent !== setupView { swapContent(setupView!) } else { relayout() }
+        if button != nil { window?.orderFrontRegardless() }
+    }
+
+    func updateSetup(message: String, isError: Bool) {
+        guard setupView != nil else { return }
+        applySetup(message: message, isError: isError)
+        if currentContent === setupView { relayout() }
+    }
+
+    private func applySetup(message: String, isError: Bool) {
+        setupMessageLabel.stringValue = message
+        setupMessageLabel.textColor = isError ? Theme.offline : .secondaryLabelColor
+        if isError {
+            setupSpinner.stopAnimation(nil)
+            setupSpinner.isHidden = true
+            setupRetryButton.isHidden = false
+            setupManualButton.isHidden = false
+        } else {
+            setupSpinner.isHidden = false
+            setupSpinner.startAnimation(nil)
+            setupRetryButton.isHidden = true
+            setupManualButton.isHidden = true
+        }
+    }
+
+    private func buildSetup() -> NSView {
+        let host = NSView()
+        host.translatesAutoresizingMaskIntoConstraints = false
+
+        let icon = iconTile(symbol: "shippingbox", size: 52, symbolSize: 28)
+
+        let title = label("设置 claude-mem", size: 16, weight: .bold)
+        title.textColor = .labelColor
+        title.alignment = .center
+
+        setupMessageLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
+        setupMessageLabel.textColor = .secondaryLabelColor
+        setupMessageLabel.alignment = .center
+        setupMessageLabel.maximumNumberOfLines = 0
+        setupMessageLabel.translatesAutoresizingMaskIntoConstraints = false
+        setupMessageLabel.preferredMaxLayoutWidth = detailContentWidth
+        setupMessageLabel.widthAnchor.constraint(equalToConstant: detailContentWidth).isActive = true
+
+        setupSpinner.style = .spinning
+        setupSpinner.controlSize = .regular
+        setupSpinner.isIndeterminate = true
+        setupSpinner.translatesAutoresizingMaskIntoConstraints = false
+
+        configurePillButton(setupRetryButton, title: "重试", action: #selector(retryTapped))
+        setupRetryButton.isHidden = true
+
+        setupManualButton.isBordered = false
+        setupManualButton.target = self
+        setupManualButton.action = #selector(manualInstallTapped)
+        setupManualButton.translatesAutoresizingMaskIntoConstraints = false
+        setupManualButton.isHidden = true
+        let manualParagraph = NSMutableParagraphStyle()
+        manualParagraph.alignment = .center
+        setupManualButton.attributedTitle = NSAttributedString(string: "查看手动安装文档", attributes: [
+            .font: NSFont.systemFont(ofSize: 11.5, weight: .medium),
+            .foregroundColor: Theme.accent,
+            .paragraphStyle: manualParagraph
+        ])
+
+        let stack = NSStackView(views: [icon, title, setupSpinner, setupMessageLabel, setupRetryButton, setupManualButton])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 12
+        stack.setCustomSpacing(8, after: title)
+        stack.setCustomSpacing(14, after: setupMessageLabel)
+        stack.edgeInsets = NSEdgeInsets(top: 36, left: 20, bottom: 32, right: 20)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            host.widthAnchor.constraint(equalToConstant: panelWidth),
+            stack.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: host.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: host.bottomAnchor)
+        ])
+        return host
+    }
+
+    @objc private func retryTapped() { onRetryInstall() }
+    @objc private func manualInstallTapped() { NSWorkspace.shared.open(claudeMemRepoURL) }
+
+    // MARK: Update banner
+
+    private func buildUpdateBanner() -> NSView {
+        updateBanner.wantsLayer = true
+        updateBanner.layer?.cornerRadius = 11
+        updateBanner.layer?.cornerCurve = .continuous
+        updateBanner.layer?.backgroundColor = Theme.accentSoft.cgColor
+        updateBanner.layer?.borderColor = Theme.accent.withAlphaComponent(0.30).cgColor
+        updateBanner.layer?.borderWidth = 1
+        updateBanner.translatesAutoresizingMaskIntoConstraints = false
+        updateBanner.isHidden = true
+
+        let icon = symbol("arrow.down.circle.fill", pointSize: 14, weight: .semibold, color: Theme.accent)
+
+        updateBannerLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        updateBannerLabel.textColor = .labelColor
+        updateBannerLabel.maximumNumberOfLines = 1
+        updateBannerLabel.lineBreakMode = .byTruncatingTail
+        updateBannerLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        configurePillButton(updateActionButton, title: "更新", action: #selector(bannerUpdateTapped))
+        configureIconButton(updateDismissButton, symbol: "xmark", action: #selector(bannerDismissTapped))
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let row = NSStackView(views: [icon, updateBannerLabel, spacer, updateActionButton, updateDismissButton])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        updateBanner.addSubview(row)
+
+        NSLayoutConstraint.activate([
+            updateBanner.widthAnchor.constraint(equalToConstant: contentWidth),
+            updateBanner.heightAnchor.constraint(equalToConstant: 38),
+            row.leadingAnchor.constraint(equalTo: updateBanner.leadingAnchor, constant: 11),
+            row.trailingAnchor.constraint(equalTo: updateBanner.trailingAnchor, constant: -8),
+            row.centerYAnchor.constraint(equalTo: updateBanner.centerYAnchor)
+        ])
+        return updateBanner
+    }
+
+    func setUpdateState(_ state: UpdateUIState?) {
+        guard let state else {
+            updateBanner.isHidden = true
+            if currentContent === dashboardView { relayout() }
+            return
+        }
+        updateBanner.isHidden = false
+        let busy: Bool
+        switch state {
+        case .available(let v):
+            updateBannerLabel.stringValue = "发现新版本 v\(v)"
+            setPillTitle(updateActionButton, "更新")
+            busy = false
+        case .downloading:
+            updateBannerLabel.stringValue = "正在下载新版本…"
+            busy = true
+        case .building:
+            updateBannerLabel.stringValue = "正在编译…"
+            busy = true
+        case .installing:
+            updateBannerLabel.stringValue = "正在安装，即将重启…"
+            busy = true
+        case .failed:
+            updateBannerLabel.stringValue = "更新失败，已打开仓库页面"
+            setPillTitle(updateActionButton, "重试")
+            busy = false
+        }
+        updateActionButton.isHidden = busy
+        updateDismissButton.isHidden = busy
+        if currentContent === dashboardView { relayout() }
+    }
+
+    @objc private func bannerUpdateTapped() { onStartUpdate() }
+    @objc private func bannerDismissTapped() { onDismissUpdate() }
+
+    private func configurePillButton(_ button: NSButton, title: String, action: Selector) {
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.backgroundColor = Theme.accent.cgColor
+        button.layer?.cornerRadius = 7
+        button.layer?.cornerCurve = .continuous
+        button.target = self
+        button.action = action
+        setPillTitle(button, title)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([
+            button.heightAnchor.constraint(equalToConstant: 24),
+            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 54)
+        ])
+    }
+
+    private func setPillTitle(_ button: NSButton, _ title: String) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        button.attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+            .foregroundColor: NSColor.white,
+            .paragraphStyle: paragraph
+        ])
+    }
+
+    private func configureIconButton(_ button: NSButton, symbol symbolName: String, action: Selector) {
+        button.isBordered = false
+        button.title = ""
+        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "忽略")?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
+        button.contentTintColor = .secondaryLabelColor
+        button.target = self
+        button.action = action
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: 22),
+            button.heightAnchor.constraint(equalToConstant: 22)
+        ])
+    }
+
+    // MARK: Detail list (async)
+
+    private var detailRowWidth: CGFloat { panelWidth - 24 }
+
+    func showDetail(_ kind: DetailKind) {
+        currentListKind = kind
+        listToken += 1
+        let token = listToken
+
+        let shell = buildListShell(kind)
+        let host = shell.host
+        let stack = shell.stack
+        let countLabel = shell.countLabel
+        swapContent(host)
+
+        // 加载占位
+        stack.addArrangedSubview(loadingRow())
+        relayout()
+
+        let apply: ([NSView], Int) -> Void = { [weak self] rows, count in
+            guard let self, token == self.listToken, self.currentContent === host else { return }
+            stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            if rows.isEmpty {
+                stack.addArrangedSubview(self.emptyRow(kind))
+            } else {
+                rows.forEach { stack.addArrangedSubview($0) }
+            }
+            countLabel.stringValue = count > 0 ? "\(count) 条" : "暂无"
+            self.relayout()
+        }
+
+        switch kind {
+        case .memories:
+            memoriesProvider { [weak self] items in
+                guard let self else { return }
+                apply(items.map { self.memoryRow($0) }, items.count)
+            }
+        case .summaries:
+            summariesProvider { [weak self] items in
+                guard let self else { return }
+                apply(items.map { self.summaryRow($0) }, items.count)
+            }
+        }
+    }
+
+    private func buildListShell(_ kind: DetailKind) -> (host: NSView, stack: FlippedStack, countLabel: NSTextField) {
+        let host = NSView()
+        host.translatesAutoresizingMaskIntoConstraints = false
+
+        let titleIcon = symbol(kind.symbol, pointSize: 13, weight: .semibold, color: Theme.accent)
+        let titleLabel = label(kind.title, size: 14, weight: .bold)
+        titleLabel.textColor = .labelColor
+
+        let countLabel = label("", size: 11.5, weight: .medium)
+        countLabel.textColor = .secondaryLabelColor
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let backButton = makeBackButton { [weak self] in self?.showDashboard() }
+        let topRow = NSStackView(views: [backButton, titleIcon, titleLabel, spacer, countLabel])
+        topRow.orientation = .horizontal
+        topRow.alignment = .centerY
+        topRow.spacing = 8
+        topRow.translatesAutoresizingMaskIntoConstraints = false
+
+        let topBar = NSView()
+        topBar.translatesAutoresizingMaskIntoConstraints = false
+        topBar.addSubview(topRow)
+        NSLayoutConstraint.activate([
+            topRow.leadingAnchor.constraint(equalTo: topBar.leadingAnchor, constant: 12),
+            topRow.trailingAnchor.constraint(equalTo: topBar.trailingAnchor, constant: -14),
+            topRow.centerYAnchor.constraint(equalTo: topBar.centerYAnchor)
+        ])
+
+        let listStack = FlippedStack()
+        listStack.orientation = .vertical
+        listStack.alignment = .leading
+        listStack.spacing = 8
+        listStack.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 10, right: 12)
+        listStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = listStack
+        NSLayoutConstraint.activate([
+            listStack.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            listStack.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            listStack.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            listStack.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)
+        ])
+
+        let footerButton = makeFooterButton("在浏览器中查看全部", symbol: "arrow.up.right.square") { [weak self] in self?.onOpenWeb() }
+        let footerBar = NSView()
+        footerBar.translatesAutoresizingMaskIntoConstraints = false
+        footerBar.addSubview(footerButton)
+        NSLayoutConstraint.activate([
+            footerButton.centerXAnchor.constraint(equalTo: footerBar.centerXAnchor),
+            footerButton.centerYAnchor.constraint(equalTo: footerBar.centerYAnchor)
+        ])
+
+        let topSep = hairline()
+        let botSep = hairline()
+        host.addSubview(topBar)
+        host.addSubview(topSep)
+        host.addSubview(scroll)
+        host.addSubview(botSep)
+        host.addSubview(footerBar)
+
+        NSLayoutConstraint.activate([
+            host.widthAnchor.constraint(equalToConstant: panelWidth),
+            host.heightAnchor.constraint(equalToConstant: detailHeight),
+
+            topBar.topAnchor.constraint(equalTo: host.topAnchor),
+            topBar.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            topBar.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            topBar.heightAnchor.constraint(equalToConstant: 46),
+
+            topSep.topAnchor.constraint(equalTo: topBar.bottomAnchor),
+            topSep.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            topSep.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+
+            scroll.topAnchor.constraint(equalTo: topSep.bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: botSep.topAnchor),
+
+            botSep.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            botSep.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            botSep.bottomAnchor.constraint(equalTo: footerBar.topAnchor),
+
+            footerBar.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            footerBar.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            footerBar.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+            footerBar.heightAnchor.constraint(equalToConstant: 44)
+        ])
+        return (host, listStack, countLabel)
+    }
+
+    private func loadingRow() -> NSView {
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isIndeterminate = true
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        spinner.startAnimation(nil)
+
+        let text = label("加载中…", size: 12.5, weight: .medium)
+        text.textColor = .secondaryLabelColor
+
+        let row = NSStackView(views: [spinner, text])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let view = NSView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(row)
+        NSLayoutConstraint.activate([
+            view.widthAnchor.constraint(equalToConstant: detailRowWidth),
+            view.heightAnchor.constraint(equalToConstant: 80),
+            row.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            row.centerYAnchor.constraint(equalTo: view.centerYAnchor)
+        ])
+        return view
+    }
+
+    private func makeBackButton(_ action: @escaping () -> Void) -> NSView {
+        let chevron = symbol("chevron.left", pointSize: 12, weight: .semibold, color: Theme.accent)
+        let text = label("返回", size: 12.5, weight: .semibold)
+        text.textColor = Theme.accent
+        let row = NSStackView(views: [chevron, text])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 2
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let view = ClickableView()
+        view.styled(corner: 7, fill: .clear, hover: Theme.controlFill)
+        view.onClick = action
+        view.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
+            row.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -7),
+            row.topAnchor.constraint(equalTo: view.topAnchor, constant: 4),
+            row.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -4)
+        ])
+        return view
+    }
+
+    private func makeFooterButton(_ title: String, symbol symbolName: String, action: @escaping () -> Void) -> NSView {
+        let icon = symbol(symbolName, pointSize: 12, weight: .semibold, color: Theme.accent)
+        let text = label(title, size: 12.5, weight: .semibold)
+        text.textColor = Theme.accent
+        let row = NSStackView(views: [icon, text])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let view = ClickableView()
+        view.styled(corner: 8, fill: .clear, hover: Theme.controlFill)
+        view.onClick = action
+        view.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            row.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            row.topAnchor.constraint(equalTo: view.topAnchor, constant: 7),
+            row.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -7)
+        ])
+        return view
+    }
+
+    private func memoryRow(_ item: MemoryItem) -> NSView {
+        let title = nonEmpty(item.title) ?? "(无标题)"
+        let snippet = cleanSnippet(nonEmpty(item.subtitle) ?? nonEmpty(item.narrative) ?? jsonArray(item.facts).first ?? item.text)
+        return listRow(title: title, snippet: snippet, meta: metaLine(project: item.project, epoch: item.created_at_epoch)) {
+            [weak self] in self?.showMemoryDetail(item)
+        }
+    }
+
+    private func summaryRow(_ item: SummaryItem) -> NSView {
+        let title = nonEmpty(item.request) ?? "(无标题)"
+        let snippet = cleanSnippet(nonEmpty(item.completed) ?? nonEmpty(item.learned) ?? item.investigated)
+        return listRow(title: title, snippet: snippet, meta: metaLine(project: item.project, epoch: item.created_at_epoch)) {
+            [weak self] in self?.showSummaryDetail(item)
+        }
+    }
+
+    private func listRow(title: String, snippet: String, meta: String, onClick: @escaping () -> Void) -> NSView {
+        // 文本宽度 = 行宽 - 左内边距(12) - 右雪佛龙占位(28)
+        let inner = detailRowWidth - 12 - 28
+
+        let titleLabel = label(title, size: 13, weight: .semibold)
+        titleLabel.textColor = .labelColor
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.widthAnchor.constraint(equalToConstant: inner).isActive = true
+
+        var views: [NSView] = [titleLabel]
+        if !snippet.isEmpty {
+            let snippetLabel = NSTextField(wrappingLabelWithString: snippet)
+            snippetLabel.font = .systemFont(ofSize: 11.5, weight: .regular)
+            snippetLabel.textColor = .secondaryLabelColor
+            snippetLabel.maximumNumberOfLines = 2
+            snippetLabel.lineBreakMode = .byTruncatingTail
+            snippetLabel.isSelectable = false
+            snippetLabel.translatesAutoresizingMaskIntoConstraints = false
+            snippetLabel.widthAnchor.constraint(equalToConstant: inner).isActive = true
+            views.append(snippetLabel)
+        }
+        let metaLabel = label(meta, size: 10.5, weight: .medium)
+        metaLabel.textColor = .tertiaryLabelColor
+        views.append(metaLabel)
+
+        // 右侧雪佛龙提示可点开详情
+        let chevron = symbol("chevron.right", pointSize: 11, weight: .semibold, color: .tertiaryLabelColor)
+
+        let vstack = NSStackView(views: views)
+        vstack.orientation = .vertical
+        vstack.alignment = .leading
+        vstack.spacing = 3
+        vstack.translatesAutoresizingMaskIntoConstraints = false
+
+        let row = ClickableView()
+        row.styled(corner: 10, fill: Theme.cardFill, hover: Theme.controlHover)
+        row.layer?.borderColor = Theme.cardBorder.cgColor
+        row.layer?.borderWidth = 1
+        row.onClick = onClick
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(vstack)
+        row.addSubview(chevron)
+        NSLayoutConstraint.activate([
+            row.widthAnchor.constraint(equalToConstant: detailRowWidth),
+            vstack.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 12),
+            vstack.topAnchor.constraint(equalTo: row.topAnchor, constant: 10),
+            vstack.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -10),
+            chevron.leadingAnchor.constraint(equalTo: vstack.trailingAnchor, constant: 6),
+            chevron.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -10),
+            chevron.centerYAnchor.constraint(equalTo: row.centerYAnchor)
+        ])
+        return row
+    }
+
+    private func emptyRow(_ kind: DetailKind) -> NSView {
+        let text = label(kind == .memories ? "暂无记忆" : "暂无摘要", size: 12.5, weight: .medium)
+        text.textColor = .secondaryLabelColor
+        let view = NSView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        text.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(text)
+        NSLayoutConstraint.activate([
+            view.widthAnchor.constraint(equalToConstant: detailRowWidth),
+            view.heightAnchor.constraint(equalToConstant: 64),
+            text.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            text.centerYAnchor.constraint(equalTo: view.centerYAnchor)
+        ])
+        return view
+    }
+
+    // MARK: Single item detail (in-app, viewer 无单条深链)
+
+    private enum DetailSection {
+        case text(String, String)
+        case bullets(String, [String])
+    }
+
+    private func showMemoryDetail(_ item: MemoryItem) {
+        let title = nonEmpty(item.title) ?? "(无标题)"
+        var meta = metaLine(project: item.project, epoch: item.created_at_epoch)
+        if let type = nonEmpty(item.type) {
+            meta = meta.isEmpty ? type : "\(type) · \(meta)"
+        }
+
+        var sections: [DetailSection] = []
+        if let s = nonEmpty(item.subtitle) { sections.append(.text("摘要", s)) }
+        if let n = nonEmpty(item.narrative) { sections.append(.text("概述", n)) }
+        let facts = jsonArray(item.facts)
+        if !facts.isEmpty { sections.append(.bullets("要点", facts)) }
+        let concepts = jsonArray(item.concepts)
+        if !concepts.isEmpty { sections.append(.text("概念", concepts.joined(separator: "、"))) }
+        let files = Array(NSOrderedSet(array: jsonArray(item.files_modified) + jsonArray(item.files_read)).array as? [String] ?? [])
+        if !files.isEmpty { sections.append(.bullets("涉及文件", files)) }
+        if sections.isEmpty, let t = nonEmpty(item.text) { sections.append(.text("内容", t)) }
+
+        swapContent(buildItemDetail(kind: .memories, headerTitle: title, meta: meta, sections: sections))
+    }
+
+    private func showSummaryDetail(_ item: SummaryItem) {
+        let title = nonEmpty(item.request) ?? "(无标题)"
+        let meta = metaLine(project: item.project, epoch: item.created_at_epoch)
+
+        var sections: [DetailSection] = []
+        if let v = nonEmpty(item.investigated) { sections.append(.text("调查", v)) }
+        if let v = nonEmpty(item.learned) { sections.append(.text("收获", v)) }
+        if let v = nonEmpty(item.completed) { sections.append(.text("完成", v)) }
+        if let v = nonEmpty(item.next_steps) { sections.append(.text("下一步", v)) }
+
+        swapContent(buildItemDetail(kind: .summaries, headerTitle: title, meta: meta, sections: sections))
+    }
+
+    private func buildItemDetail(kind: DetailKind, headerTitle: String, meta: String, sections: [DetailSection]) -> NSView {
+        let host = NSView()
+        host.translatesAutoresizingMaskIntoConstraints = false
+
+        let titleIcon = symbol(kind.symbol, pointSize: 13, weight: .semibold, color: Theme.accent)
+        let titleLabel = label(kind.title + "详情", size: 14, weight: .bold)
+        titleLabel.textColor = .labelColor
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // 返回到对应列表
+        let backButton = makeBackButton { [weak self] in self?.showDetail(kind) }
+        let topRow = NSStackView(views: [backButton, titleIcon, titleLabel, spacer])
+        topRow.orientation = .horizontal
+        topRow.alignment = .centerY
+        topRow.spacing = 8
+        topRow.translatesAutoresizingMaskIntoConstraints = false
+
+        let topBar = NSView()
+        topBar.translatesAutoresizingMaskIntoConstraints = false
+        topBar.addSubview(topRow)
+        NSLayoutConstraint.activate([
+            topRow.leadingAnchor.constraint(equalTo: topBar.leadingAnchor, constant: 12),
+            topRow.trailingAnchor.constraint(equalTo: topBar.trailingAnchor, constant: -14),
+            topRow.centerYAnchor.constraint(equalTo: topBar.centerYAnchor)
+        ])
+
+        // 内容
+        let content = FlippedStack()
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 14
+        content.edgeInsets = NSEdgeInsets(top: 14, left: 20, bottom: 18, right: 20)
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        let bigTitle = NSTextField(wrappingLabelWithString: headerTitle)
+        bigTitle.font = .systemFont(ofSize: 15, weight: .bold)
+        bigTitle.textColor = .labelColor
+        bigTitle.isSelectable = true
+        bigTitle.translatesAutoresizingMaskIntoConstraints = false
+        bigTitle.preferredMaxLayoutWidth = detailContentWidth
+        bigTitle.widthAnchor.constraint(equalToConstant: detailContentWidth).isActive = true
+        content.addArrangedSubview(bigTitle)
+
+        if !meta.isEmpty {
+            let metaLabel = label(meta, size: 11, weight: .medium)
+            metaLabel.textColor = .tertiaryLabelColor
+            content.addArrangedSubview(metaLabel)
+        }
+
+        if sections.isEmpty {
+            let empty = label("暂无更多内容", size: 12.5, weight: .medium)
+            empty.textColor = .secondaryLabelColor
+            content.addArrangedSubview(empty)
+        } else {
+            for section in sections {
+                content.addArrangedSubview(sectionView(section))
+            }
+        }
+
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = content
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            content.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            content.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)
+        ])
+
+        let footerButton = makeFooterButton("在浏览器中打开", symbol: "arrow.up.right.square") { [weak self] in self?.onOpenWeb() }
+        let footerBar = NSView()
+        footerBar.translatesAutoresizingMaskIntoConstraints = false
+        footerBar.addSubview(footerButton)
+        NSLayoutConstraint.activate([
+            footerButton.centerXAnchor.constraint(equalTo: footerBar.centerXAnchor),
+            footerButton.centerYAnchor.constraint(equalTo: footerBar.centerYAnchor)
+        ])
+
+        let topSep = hairline()
+        let botSep = hairline()
+        host.addSubview(topBar)
+        host.addSubview(topSep)
+        host.addSubview(scroll)
+        host.addSubview(botSep)
+        host.addSubview(footerBar)
+
+        NSLayoutConstraint.activate([
+            host.widthAnchor.constraint(equalToConstant: panelWidth),
+            host.heightAnchor.constraint(equalToConstant: detailHeight),
+
+            topBar.topAnchor.constraint(equalTo: host.topAnchor),
+            topBar.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            topBar.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            topBar.heightAnchor.constraint(equalToConstant: 46),
+
+            topSep.topAnchor.constraint(equalTo: topBar.bottomAnchor),
+            topSep.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            topSep.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+
+            scroll.topAnchor.constraint(equalTo: topSep.bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: botSep.topAnchor),
+
+            botSep.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            botSep.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            botSep.bottomAnchor.constraint(equalTo: footerBar.topAnchor),
+
+            footerBar.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            footerBar.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            footerBar.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+            footerBar.heightAnchor.constraint(equalToConstant: 44)
+        ])
+        return host
+    }
+
+    private func sectionView(_ section: DetailSection) -> NSView {
+        let header: String
+        let body: NSView
+        switch section {
+        case .text(let h, let value):
+            header = h
+            let text = NSTextField(wrappingLabelWithString: value)
+            text.font = .systemFont(ofSize: 12.5, weight: .regular)
+            text.textColor = .labelColor
+            text.isSelectable = true
+            text.translatesAutoresizingMaskIntoConstraints = false
+            text.preferredMaxLayoutWidth = detailContentWidth
+            text.widthAnchor.constraint(equalToConstant: detailContentWidth).isActive = true
+            body = text
+        case .bullets(let h, let items):
+            header = h
+            let stack = NSStackView()
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 5
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            for item in items {
+                stack.addArrangedSubview(bulletRow(item))
+            }
+            body = stack
+        }
+
+        let headerLabel = label(header, size: 11, weight: .semibold)
+        headerLabel.textColor = Theme.accent
+
+        let wrapper = NSStackView(views: [headerLabel, body])
+        wrapper.orientation = .vertical
+        wrapper.alignment = .leading
+        wrapper.spacing = 6
+        wrapper.translatesAutoresizingMaskIntoConstraints = false
+        return wrapper
+    }
+
+    private func bulletRow(_ text: String) -> NSView {
+        let dot = label("•", size: 12.5, weight: .bold)
+        dot.textColor = Theme.accent
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        dot.setContentHuggingPriority(.required, for: .horizontal)
+
+        let bodyWidth = detailContentWidth - 16
+        let text = NSTextField(wrappingLabelWithString: text)
+        text.font = .systemFont(ofSize: 12.5, weight: .regular)
+        text.textColor = .labelColor
+        text.isSelectable = true
+        text.translatesAutoresizingMaskIntoConstraints = false
+        text.preferredMaxLayoutWidth = bodyWidth
+        text.widthAnchor.constraint(equalToConstant: bodyWidth).isActive = true
+
+        let row = NSStackView(views: [dot, text])
+        row.orientation = .horizontal
+        row.alignment = .firstBaseline
+        row.spacing = 6
+        row.translatesAutoresizingMaskIntoConstraints = false
+        return row
+    }
+
+    private func hairline() -> NSView {
+        let line = NSView()
+        line.wantsLayer = true
+        line.layer?.backgroundColor = Theme.cardBorder.cgColor
+        line.translatesAutoresizingMaskIntoConstraints = false
+        line.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        return line
+    }
+
+    private func metaLine(project: String?, epoch: Int?) -> String {
+        var parts: [String] = []
+        if let project, !project.isEmpty { parts.append(project) }
+        if let epoch { parts.append(relativeTime(epoch)) }
+        return parts.joined(separator: " · ")
+    }
+
+    private func relativeTime(_ epoch: Int) -> String {
+        // claude-mem 时间戳为毫秒；兼容秒级
+        let seconds = epoch > 4_000_000_000 ? epoch / 1000 : epoch
+        let diff = max(0, Int(Date().timeIntervalSince1970) - seconds)
+        if diff < 60 { return "刚刚" }
+        if diff < 3600 { return "\(diff / 60) 分钟前" }
+        if diff < 86400 { return "\(diff / 3600) 小时前" }
+        if diff < 86400 * 7 { return "\(diff / 86400) 天前" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date(timeIntervalSince1970: TimeInterval(seconds)))
+    }
+
+    private func nonEmpty(_ s: String?) -> String? {
+        guard let s, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return s
+    }
+
+    private func jsonArray(_ raw: String?) -> [String] {
+        guard let raw, let data = raw.data(using: .utf8) else { return [] }
+        if let arr = try? JSONSerialization.jsonObject(with: data) as? [String] {
+            return arr.compactMap { nonEmpty($0) }
+        }
+        return []
+    }
+
+    private func cleanSnippet(_ raw: String?) -> String {
+        guard var s = raw, !s.isEmpty else { return "" }
+        s = s.replacingOccurrences(of: "\n", with: " ")
+        s = s.replacingOccurrences(of: "\t", with: " ")
+        while s.contains("  ") { s = s.replacingOccurrences(of: "  ", with: " ") }
+        s = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.count > 140 { s = String(s.prefix(140)) + "…" }
+        return s
     }
 
     private func header() -> NSView {
@@ -458,9 +1462,9 @@ final class DashboardWindowController: NSWindowController {
     }
 
     private func statsCard() -> NSView {
-        let memory = statTile(memoryValue, "记忆")
+        let memory = clickableStat(memoryValue, "记忆", kind: .memories)
         let session = statTile(sessionValue, "会话")
-        let summary = statTile(summaryValue, "摘要")
+        let summary = clickableStat(summaryValue, "摘要", kind: .summaries)
 
         let row = NSStackView(views: [memory, divider(), session, divider(), summary])
         row.orientation = .horizontal
@@ -524,6 +1528,28 @@ final class DashboardWindowController: NSWindowController {
         rows.alignment = .leading
         rows.spacing = 8
         return card(title: "最近活动", symbol: "clock.arrow.circlepath", content: rows)
+    }
+
+    private func languageCard() -> NSView {
+        languageSegment.segmentDistribution = .fillEqually
+        languageSegment.target = self
+        languageSegment.action = #selector(languageChanged)
+        languageSegment.selectedSegment = languageProvider()
+        languageSegment.translatesAutoresizingMaskIntoConstraints = false
+        languageSegment.widthAnchor.constraint(equalToConstant: cardInnerWidth).isActive = true
+
+        let hint = label("切换记忆生成语言（保存后将重启服务）", size: 10.5, weight: .medium)
+        hint.textColor = .tertiaryLabelColor
+
+        let rows = NSStackView(views: [languageSegment, hint])
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 7
+        return card(title: "记忆语言", symbol: "character.bubble", content: rows)
+    }
+
+    @objc private func languageChanged() {
+        onSelectLanguage(languageSegment.selectedSegment)
     }
 
     private func actionsCard(
@@ -622,6 +1648,24 @@ final class DashboardWindowController: NSWindowController {
         stack.alignment = .centerX
         stack.spacing = 2
         return stack
+    }
+
+    private func clickableStat(_ value: NSTextField, _ title: String, kind: DetailKind) -> NSView {
+        let content = statTile(value, title)
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        let view = ClickableView()
+        view.styled(corner: 9, fill: .clear, hover: Theme.controlFill)
+        view.onClick = { [weak self] in self?.showDetail(kind) }
+        view.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: view.topAnchor, constant: 2),
+            content.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -2),
+            content.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            content.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 2),
+            content.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -2)
+        ])
+        return view
     }
 
     private func infoCell(_ key: String, _ value: NSTextField) -> NSView {
@@ -750,22 +1794,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quitSelector: #selector(quit)
     )
     private var timer: Timer?
+    private var updateTimer: Timer?
     private var lastHealth: Health?
     private var lastCounts = Counts()
     private var lastRefresh = Date()
     private var isRefreshing = false
 
+    // 详情数据缓存（避免重复 sqlite 调用造成卡顿）
+    private var cachedMemories: [MemoryItem]?
+    private var cachedSummaries: [SummaryItem]?
+
+    // 安装引导状态
+    private var isReady = false
+    private var isInstalling = false
+    private var setupMessage = "正在检测 claude-mem…"
+    private var setupIsError = false
+
+    // 热更新状态
+    private var availableVersion: String?
+    private var lastUpdateCheck: Date?
+    private var isUpdating = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        wireDashboard()
         buildStatusItem()
-        refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
-            self?.refresh()
+
+        if isClaudeMemInstalled() {
+            markReady()
+        } else {
+            beginInstallFlow(auto: true)
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         timer?.invalidate()
+        updateTimer?.invalidate()
+    }
+
+    private func wireDashboard() {
+        dashboard.memoriesProvider = { [weak self] completion in self?.loadMemories(completion) }
+        dashboard.summariesProvider = { [weak self] completion in self?.loadSummaries(completion) }
+        dashboard.onOpenWeb = { NSWorkspace.shared.open(webURL) }
+        dashboard.onStartUpdate = { [weak self] in self?.startUpdate() }
+        dashboard.onDismissUpdate = { [weak self] in self?.dismissUpdate() }
+        dashboard.onRetryInstall = { [weak self] in self?.beginInstallFlow(auto: false) }
+        dashboard.languageProvider = { [weak self] in (self?.currentLanguage() ?? .chinese).rawValue }
+        dashboard.onSelectLanguage = { [weak self] index in
+            self?.setLanguage(Language(rawValue: index) ?? .chinese)
+        }
     }
 
     private func buildStatusItem() {
@@ -780,14 +1857,220 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func startTimers() {
+        timer?.invalidate()
+        updateTimer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            self?.refresh()
+        }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
+            self?.checkForUpdate(force: true)
+        }
+    }
+
+    // MARK: Install flow (Req3)
+
+    private func isClaudeMemInstalled() -> Bool {
+        let fm = FileManager.default
+        return fm.fileExists(atPath: pluginMarkerPath) || fm.fileExists(atPath: databasePath)
+    }
+
+    private func markReady() {
+        guard !isReady else { return }
+        isReady = true
+        applyChineseDefaultIfNeeded()
+        refresh()
+        checkForUpdate(force: true)
+        startTimers()
+    }
+
+    private func beginInstallFlow(auto: Bool) {
+        guard !isInstalling else { return }
+        isInstalling = true
+        setupIsError = false
+        setupMessage = "检测到尚未安装 claude-mem，正在自动安装…"
+        if let button = statusItem.button {
+            dashboard.showSetup(message: setupMessage, isError: false, relativeTo: button)
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.performInstall(progress: { message in
+                DispatchQueue.main.async {
+                    self.setupMessage = message
+                    self.dashboard.updateSetup(message: message, isError: false)
+                }
+            }, done: { ok, errorMessage in
+                DispatchQueue.main.async {
+                    self.isInstalling = false
+                    if ok {
+                        self.markReady()
+                        if let button = self.statusItem.button {
+                            self.dashboard.show(health: self.lastHealth, counts: self.lastCounts, refreshedAt: self.lastRefresh, relativeTo: button)
+                        }
+                    } else {
+                        self.setupIsError = true
+                        self.setupMessage = errorMessage
+                        self.dashboard.updateSetup(message: errorMessage, isError: true)
+                    }
+                }
+            })
+        }
+    }
+
+    /// 检测 node/npx → 运行 `npx claude-mem@latest install` → 配置中文 → 启动 worker。
+    private func performInstall(progress: @escaping (String) -> Void, done: @escaping (Bool, String) -> Void) {
+        progress("正在检测 Node.js 环境…")
+        guard let node = findNodeBinary() else {
+            done(false, "未检测到 Node.js / npx。请先安装 Node.js（nodejs.org）后点击重试。")
+            return
+        }
+
+        var env = ProcessInfo.processInfo.environment
+        let extraPaths = [node.binDir, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        env["PATH"] = (extraPaths + [env["PATH"] ?? ""]).joined(separator: ":")
+
+        progress("正在安装 claude-mem（首次安装可能需要几分钟）…")
+        let install = Self.run(node.npx, ["-y", "claude-mem@latest", "install"], env: env)
+        if install.status != 0 {
+            let detail = install.stderr.isEmpty ? install.stdout : install.stderr
+            let tail = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+            done(false, "安装失败：\(tail.isEmpty ? "未知错误" : String(tail.suffix(160)))")
+            return
+        }
+
+        progress("正在配置默认中文输出…")
+        _ = writeLanguageMode(.chinese)
+
+        progress("正在启动后台服务…")
+        _ = Self.run(node.npx, ["-y", "claude-mem@latest", "start"], env: env)
+
+        done(true, "")
+    }
+
+    /// 在常见安装位置查找 npx（launchd 环境 PATH 极简，which 不可用）。
+    private func findNodeBinary() -> (npx: String, binDir: String)? {
+        let fm = FileManager.default
+        var candidates: [String] = []
+
+        // nvm：选择版本号最大的
+        let nvmRoot = NSString(string: "~/.nvm/versions/node").expandingTildeInPath
+        if let versions = try? fm.contentsOfDirectory(atPath: nvmRoot) {
+            let sorted = versions.sorted { lhs, rhs in
+                Self.versionKey(lhs).lexicographicallyPrecedes(Self.versionKey(rhs))
+            }
+            for version in sorted.reversed() {
+                candidates.append(nvmRoot + "/" + version + "/bin/npx")
+            }
+        }
+        // 其他常见位置
+        candidates.append(contentsOf: [
+            "/opt/homebrew/bin/npx",
+            "/usr/local/bin/npx",
+            NSString(string: "~/.volta/bin/npx").expandingTildeInPath,
+            "/opt/homebrew/opt/node/bin/npx",
+            "/usr/bin/npx"
+        ])
+
+        for path in candidates where fm.isExecutableFile(atPath: path) {
+            return (path, (path as NSString).deletingLastPathComponent)
+        }
+        return nil
+    }
+
+    private static func versionKey(_ s: String) -> [Int] {
+        s.replacingOccurrences(of: "v", with: "")
+            .split(separator: ".")
+            .map { Int($0.prefix(while: { $0.isNumber })) ?? 0 }
+    }
+
+    // MARK: Language (Req4)
+
+    private func readSettings() -> [String: Any] {
+        guard let data = FileManager.default.contents(atPath: settingsPath),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+        return object
+    }
+
+    @discardableResult
+    private func writeSettings(_ dict: [String: Any]) -> Bool {
+        guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]) else {
+            return false
+        }
+        let dir = (settingsPath as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        return (try? data.write(to: URL(fileURLWithPath: settingsPath))) != nil
+    }
+
+    private func currentMode() -> String {
+        (readSettings()["CLAUDE_MEM_MODE"] as? String) ?? "code"
+    }
+
+    private func currentLanguage() -> Language {
+        currentMode().contains("zh") ? .chinese : .english
+    }
+
+    /// 仅写入设置（不重启 worker）。中文=<base>--zh，英文=<base>。
+    @discardableResult
+    private func writeLanguageMode(_ language: Language) -> Bool {
+        var settings = readSettings()
+        let mode = (settings["CLAUDE_MEM_MODE"] as? String) ?? "code"
+        let base = mode.components(separatedBy: "--").first ?? "code"
+        settings["CLAUDE_MEM_MODE"] = language == .chinese ? base + "--zh" : base
+        return writeSettings(settings)
+    }
+
+    /// 切换语言：写入设置 + 重启 worker + 失效缓存。
+    private func setLanguage(_ language: Language) {
+        guard currentLanguage() != language else { return }
+        _ = writeLanguageMode(language)
+        cachedMemories = nil
+        cachedSummaries = nil
+        setTransientStatus(language == .chinese ? "正在切换为中文并重启…" : "Switching to English…")
+        kickstartWorker()
+    }
+
+    /// 首次运行应用时，将默认语言设为中文（仅一次，尊重后续手动选择）。
+    private func applyChineseDefaultIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: languageDefaultAppliedKey) else { return }
+        defaults.set(true, forKey: languageDefaultAppliedKey)
+        if currentLanguage() != .chinese {
+            setLanguage(.chinese)
+        }
+    }
+
+    private func kickstartWorker() {
+        DispatchQueue.global(qos: .utility).async {
+            let uid = getuid()
+            _ = Self.run("/bin/launchctl", ["kickstart", "-k", "gui/\(uid)/\(workerLabel)"])
+            Thread.sleep(forTimeInterval: 2.0)
+            DispatchQueue.main.async {
+                self.refresh()
+            }
+        }
+    }
+
+    // MARK: Actions
+
     @objc private func openWebUI() {
         NSWorkspace.shared.open(webURL)
     }
 
     @objc private func toggleDashboard() {
         guard let button = statusItem.button else { return }
+        if !isReady {
+            if dashboard.window?.isVisible == true {
+                dashboard.window?.orderOut(nil)
+            } else {
+                dashboard.showSetup(message: setupMessage, isError: setupIsError, relativeTo: button)
+            }
+            return
+        }
         dashboard.toggle(health: lastHealth, counts: lastCounts, refreshedAt: lastRefresh, relativeTo: button)
         refresh()
+        checkForUpdate()
     }
 
     @objc private func copyWebURL() {
@@ -804,24 +2087,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func refreshNow() {
+        cachedMemories = nil
+        cachedSummaries = nil
         refresh()
     }
 
     @objc private func restartWorker() {
         setTransientStatus("正在重启 Worker...")
-        DispatchQueue.global(qos: .utility).async {
-            let uid = getuid()
-            _ = Self.run("/bin/launchctl", ["kickstart", "-k", "gui/\(uid)/com.claude-mem.worker"])
-            Thread.sleep(forTimeInterval: 2.0)
-            DispatchQueue.main.async {
-                self.refresh()
-            }
-        }
+        kickstartWorker()
     }
 
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
     }
+
+    // MARK: Refresh
 
     private func refresh() {
         guard !isRefreshing else { return }
@@ -903,10 +2183,156 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return counts
     }
 
+    // MARK: Detail data (Req2: 异步加载 + 缓存)
+
+    /// 立即返回缓存（如有），同时后台刷新一次。回调始终在主线程。
+    private func loadMemories(_ completion: @escaping ([MemoryItem]) -> Void) {
+        if let cache = cachedMemories {
+            completion(cache)
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let items = self.fetchObservations(limit: 40)
+            DispatchQueue.main.async {
+                self.cachedMemories = items
+                completion(items)
+            }
+        }
+    }
+
+    private func loadSummaries(_ completion: @escaping ([SummaryItem]) -> Void) {
+        if let cache = cachedSummaries {
+            completion(cache)
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let items = self.fetchSummaries(limit: 40)
+            DispatchQueue.main.async {
+                self.cachedSummaries = items
+                completion(items)
+            }
+        }
+    }
+
+    private func fetchObservations(limit: Int) -> [MemoryItem] {
+        guard FileManager.default.fileExists(atPath: databasePath) else { return [] }
+        let sql = "select id, title, subtitle, project, type, narrative, facts, concepts, files_read, files_modified, text, created_at_epoch " +
+            "from observations order by created_at_epoch desc limit \(limit);"
+        let output = Self.run("/usr/bin/sqlite3", ["-json", databasePath, sql]).stdout
+        guard let data = output.data(using: .utf8), !data.isEmpty else { return [] }
+        return (try? JSONDecoder().decode([MemoryItem].self, from: data)) ?? []
+    }
+
+    private func fetchSummaries(limit: Int) -> [SummaryItem] {
+        guard FileManager.default.fileExists(atPath: databasePath) else { return [] }
+        let sql = "select id, project, request, investigated, learned, completed, next_steps, created_at_epoch " +
+            "from session_summaries order by created_at_epoch desc limit \(limit);"
+        let output = Self.run("/usr/bin/sqlite3", ["-json", databasePath, sql]).stdout
+        guard let data = output.data(using: .utf8), !data.isEmpty else { return [] }
+        return (try? JSONDecoder().decode([SummaryItem].self, from: data)) ?? []
+    }
+
+    // MARK: Update
+
+    private func checkForUpdate(force: Bool = false) {
+        if !force, let last = lastUpdateCheck, Date().timeIntervalSince(last) < 3600 { return }
+        lastUpdateCheck = Date()
+
+        var request = URLRequest(url: rawVersionURL)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 4
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            guard let self,
+                  let data,
+                  let raw = String(data: data, encoding: .utf8) else { return }
+            let remote = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !remote.isEmpty, Self.semverGreater(remote, than: appVersion) else {
+                DispatchQueue.main.async {
+                    if !self.isUpdating { self.availableVersion = nil; self.dashboard.setUpdateState(nil) }
+                }
+                return
+            }
+            let ignored = UserDefaults.standard.string(forKey: ignoredVersionKey)
+            DispatchQueue.main.async {
+                guard !self.isUpdating else { return }
+                self.availableVersion = remote
+                self.dashboard.setUpdateState(remote == ignored ? nil : .available(remote))
+            }
+        }.resume()
+    }
+
+    private static func semverGreater(_ lhs: String, than rhs: String) -> Bool {
+        func parts(_ s: String) -> [Int] {
+            s.split(separator: ".").map { Int($0.prefix(while: { $0.isNumber })) ?? 0 }
+        }
+        let a = parts(lhs), b = parts(rhs)
+        for i in 0..<max(a.count, b.count) {
+            let x = i < a.count ? a[i] : 0
+            let y = i < b.count ? b[i] : 0
+            if x != y { return x > y }
+        }
+        return false
+    }
+
+    private func startUpdate() {
+        guard availableVersion != nil, !isUpdating else { return }
+        isUpdating = true
+        dashboard.setUpdateState(.downloading)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ok = self.performUpdate { state in
+                DispatchQueue.main.async { self.dashboard.setUpdateState(state) }
+            }
+            // 成功时 install.sh 会经 launchctl kickstart 重启本进程，下面通常不会执行到
+            if !ok {
+                NSWorkspace.shared.open(repoWebURL)
+                DispatchQueue.main.async {
+                    self.isUpdating = false
+                    self.dashboard.setUpdateState(.failed)
+                }
+            }
+        }
+    }
+
+    private func dismissUpdate() {
+        if let version = availableVersion {
+            UserDefaults.standard.set(version, forKey: ignoredVersionKey)
+        }
+        dashboard.setUpdateState(nil)
+    }
+
+    /// 下载最新源码 → 本地编译 → 安装 → 重启。任一步失败返回 false。
+    private func performUpdate(progress: @escaping (UpdateUIState) -> Void) -> Bool {
+        let path = "/usr/bin:/bin:/usr/sbin:/sbin"
+        let tmp = NSTemporaryDirectory() + "claudemembar-update-\(UUID().uuidString)"
+        let tarPath = tmp + "/src.tar.gz"
+        guard (try? FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)) != nil else {
+            return false
+        }
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let download = Self.run("/usr/bin/curl",
+                                ["-fsSL", "-o", tarPath, tarballURL.absoluteString],
+                                env: ["PATH": path])
+        if download.status != 0 { return false }
+
+        progress(.building)
+        let extract = Self.run("/usr/bin/tar", ["-xzf", tarPath, "-C", tmp], env: ["PATH": path])
+        if extract.status != 0 { return false }
+
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: tmp),
+              let repoDir = entries.first(where: { $0.hasPrefix("ClaudeMemBar-") }) else { return false }
+        let installScript = tmp + "/" + repoDir + "/scripts/install.sh"
+        guard FileManager.default.fileExists(atPath: installScript) else { return false }
+
+        progress(.installing)
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = path
+        let install = Self.run("/bin/bash", [installScript], env: env)
+        return install.status == 0
+    }
+
     private func render() {
-        let isReady = lastHealth?.status == "ok" || lastHealth?.status == "ready"
-        let statusText = isReady ? "运行中" : "离线"
-        let symbolName = isReady ? "brain.head.profile" : "exclamationmark.triangle"
+        let isReadyStatus = lastHealth?.status == "ok" || lastHealth?.status == "ready"
+        let statusText = isReadyStatus ? "运行中" : "离线"
+        let symbolName = isReadyStatus ? "brain.head.profile" : "exclamationmark.triangle"
 
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: statusText)
@@ -923,10 +2349,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private static func run(_ executable: String, _ arguments: [String]) -> (stdout: String, stderr: String, status: Int32) {
+    private static func run(_ executable: String, _ arguments: [String], env: [String: String]? = nil) -> (stdout: String, stderr: String, status: Int32) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        if let env { process.environment = env }
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
