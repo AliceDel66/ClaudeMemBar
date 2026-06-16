@@ -1,0 +1,7 @@
+.DS_Store
+AGENTS.md
+dist/
+outputs/
+work/
+*.log
+*.xcarchive
