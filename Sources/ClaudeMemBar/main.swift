@@ -7,6 +7,8 @@ private let healthURL = URL(string: "http://127.0.0.1:37701/api/health")!
 private let databasePath = NSString(string: "~/.claude-mem/claude-mem.db").expandingTildeInPath
 private let logsURL = URL(fileURLWithPath: NSString(string: "~/.claude-mem/logs").expandingTildeInPath)
 
+// MARK: - Data
+
 struct Health: Decodable {
     let status: String?
     let version: String?
@@ -31,7 +33,103 @@ struct Counts {
     var lastCreatedAt: String?
 }
 
-final class ToolbarButton: NSButton {
+// MARK: - Theme
+
+enum Theme {
+    static let accent = dynamic(
+        light: NSColor(calibratedRed: 0.42, green: 0.30, blue: 0.88, alpha: 1.0),
+        dark: NSColor(calibratedRed: 0.66, green: 0.58, blue: 1.0, alpha: 1.0)
+    )
+    static let accentSoft = dynamic(
+        light: NSColor(calibratedRed: 0.42, green: 0.30, blue: 0.88, alpha: 0.12),
+        dark: NSColor(calibratedRed: 0.66, green: 0.58, blue: 1.0, alpha: 0.18)
+    )
+    static let cardFill = dynamic(
+        light: NSColor(calibratedWhite: 1.0, alpha: 0.72),
+        dark: NSColor(calibratedWhite: 1.0, alpha: 0.06)
+    )
+    static let cardBorder = dynamic(
+        light: NSColor(calibratedWhite: 0.0, alpha: 0.07),
+        dark: NSColor(calibratedWhite: 1.0, alpha: 0.10)
+    )
+    static let controlFill = dynamic(
+        light: NSColor(calibratedWhite: 0.0, alpha: 0.045),
+        dark: NSColor(calibratedWhite: 1.0, alpha: 0.08)
+    )
+    static let controlHover = dynamic(
+        light: NSColor(calibratedWhite: 0.0, alpha: 0.085),
+        dark: NSColor(calibratedWhite: 1.0, alpha: 0.16)
+    )
+    static let online = NSColor.systemGreen
+    static let offline = NSColor.systemRed
+    static let warning = NSColor.systemOrange
+
+    static func dynamic(light: NSColor, dark: NSColor) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            return isDark ? dark : light
+        }
+    }
+
+    static func roundedFont(_ size: CGFloat, _ weight: NSFont.Weight) -> NSFont {
+        let base = NSFont.systemFont(ofSize: size, weight: weight)
+        if let descriptor = base.fontDescriptor.withDesign(.rounded) {
+            return NSFont(descriptor: descriptor, size: size) ?? base
+        }
+        return base
+    }
+}
+
+// MARK: - Action tile
+
+final class ActionTile: NSButton {
+    var tint: NSColor = .labelColor {
+        didSet { applyTitle() }
+    }
+    private var titleText: String = ""
+
+    init(title: String, symbol: String, tint: NSColor, target: AnyObject, action: Selector) {
+        super.init(frame: .zero)
+        self.titleText = title
+        self.tint = tint
+        self.target = target
+        self.action = action
+        self.title = ""
+        isBordered = false
+        imagePosition = .imageAbove
+        imageScaling = .scaleProportionallyDown
+        wantsLayer = true
+        layer?.cornerRadius = 10
+        layer?.cornerCurve = .continuous
+        layer?.backgroundColor = Theme.controlFill.cgColor
+        contentTintColor = tint
+        let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
+            .withSymbolConfiguration(config)
+        applyTitle()
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: 50).isActive = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private func applyTitle() {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        attributedTitle = NSAttributedString(string: titleText, attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: tint,
+            .paragraphStyle: paragraph
+        ])
+    }
+
+    override func updateLayer() {
+        super.updateLayer()
+        layer?.backgroundColor = (isHovered ? Theme.controlHover : Theme.controlFill).cgColor
+    }
+
+    private var isHovered = false
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach { removeTrackingArea($0) }
@@ -44,34 +142,37 @@ final class ToolbarButton: NSButton {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        layer?.backgroundColor = NSColor(calibratedRed: 0.875, green: 0.886, blue: 0.910, alpha: 1.0).cgColor
+        isHovered = true
+        layer?.backgroundColor = Theme.controlHover.cgColor
     }
 
     override func mouseExited(with event: NSEvent) {
-        layer?.backgroundColor = NSColor(calibratedRed: 0.925, green: 0.932, blue: 0.948, alpha: 1.0).cgColor
+        isHovered = false
+        layer?.backgroundColor = Theme.controlFill.cgColor
     }
 }
 
+// MARK: - Dashboard
+
 final class DashboardWindowController: NSWindowController {
-    private let panelWidth: CGFloat = 376
-    private let panelHeight: CGFloat = 512
-    private let accent = NSColor(calibratedRed: 0.41, green: 0.24, blue: 0.90, alpha: 1.0)
-    private let accentSoft = NSColor(calibratedRed: 0.93, green: 0.90, blue: 1.0, alpha: 1.0)
-    private let panelBackground = NSColor(calibratedRed: 0.965, green: 0.972, blue: 0.985, alpha: 0.98)
-    private let cardBackground = NSColor(calibratedRed: 0.995, green: 0.997, blue: 1.0, alpha: 0.96)
-    private let controlBackground = NSColor(calibratedRed: 0.925, green: 0.932, blue: 0.948, alpha: 1.0)
-    private let mutedText = NSColor(calibratedRed: 0.43, green: 0.47, blue: 0.56, alpha: 1.0)
-    private let darkText = NSColor(calibratedRed: 0.075, green: 0.095, blue: 0.15, alpha: 1.0)
+    private let panelWidth: CGFloat = 360
+    private var contentWidth: CGFloat { panelWidth - 32 }
+    private var cardInnerWidth: CGFloat { panelWidth - 32 - 24 }
 
     private let statusDot = NSView()
-    private let statusPillView = NSView()
     private let statusBadge = NSTextField(labelWithString: "检查中")
-    private let workerValue = NSTextField(labelWithString: "--")
-    private let workerMetaValue = NSTextField(labelWithString: "--")
-    private let aiValue = NSTextField(labelWithString: "--")
+    private let statusPillView = NSView()
+
     private let memoryValue = NSTextField(labelWithString: "0")
     private let sessionValue = NSTextField(labelWithString: "0")
     private let summaryValue = NSTextField(labelWithString: "0")
+
+    private let versionValue = NSTextField(labelWithString: "--")
+    private let pidValue = NSTextField(labelWithString: "--")
+    private let uptimeValue = NSTextField(labelWithString: "--")
+    private let mcpValue = NSTextField(labelWithString: "--")
+    private let modelValue = NSTextField(labelWithString: "--")
+
     private let projectsValue = NSTextField(labelWithString: "暂无")
     private let latestValue = NSTextField(labelWithString: "暂无")
     private let updatedValue = NSTextField(labelWithString: "--")
@@ -86,7 +187,7 @@ final class DashboardWindowController: NSWindowController {
         quitSelector: Selector
     ) {
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
+            contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: 520),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -102,7 +203,8 @@ final class DashboardWindowController: NSWindowController {
         panel.level = .statusBar
 
         super.init(window: panel)
-        panel.contentView = buildContent(
+
+        let root = buildContent(
             actionTarget: actionTarget,
             openSelector: openSelector,
             copySelector: copySelector,
@@ -111,11 +213,12 @@ final class DashboardWindowController: NSWindowController {
             logsSelector: logsSelector,
             quitSelector: quitSelector
         )
+        panel.contentView = root
+        root.layoutSubtreeIfNeeded()
+        panel.setContentSize(root.fittingSize)
     }
 
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func toggle(health: Health?, counts: Counts, refreshedAt: Date, relativeTo button: NSStatusBarButton) {
         if window?.isVisible == true {
@@ -133,40 +236,53 @@ final class DashboardWindowController: NSWindowController {
 
     func update(health: Health?, counts: Counts, refreshedAt: Date) {
         let ready = health?.status == "ok" || health?.status == "ready"
-        let statusColor = ready ? NSColor.systemGreen : NSColor.systemRed
+        let statusColor = ready ? Theme.online : Theme.offline
         statusBadge.stringValue = ready ? "运行中" : "离线"
         statusBadge.textColor = statusColor
         statusDot.layer?.backgroundColor = statusColor.cgColor
         statusPillView.layer?.backgroundColor = statusColor.withAlphaComponent(0.16).cgColor
 
         if let health {
-            let version = health.version ?? "unknown"
-            let pid = health.pid.map(String.init) ?? "--"
-            let uptime = formatUptime(health.uptime ?? 0)
-            let mcp = health.mcpReady == true ? "MCP 就绪" : "MCP 未就绪"
-            workerValue.stringValue = "v\(version) · PID \(pid)"
-            workerMetaValue.stringValue = "\(uptime) · \(mcp)"
-            aiValue.stringValue = "\(health.ai?.provider ?? "unknown") · \(health.ai?.authMethod ?? "未检测到认证信息")"
+            versionValue.stringValue = "v\(health.version ?? "未知")"
+            pidValue.stringValue = health.pid.map(String.init) ?? "--"
+            uptimeValue.stringValue = formatUptime(health.uptime ?? 0)
+            let mcpReady = health.mcpReady == true
+            mcpValue.stringValue = mcpReady ? "就绪" : "未就绪"
+            mcpValue.textColor = mcpReady ? Theme.online : Theme.warning
+            if let provider = health.ai?.provider, !provider.isEmpty {
+                if let auth = health.ai?.authMethod, !auth.isEmpty {
+                    modelValue.stringValue = "\(provider) · \(auth)"
+                } else {
+                    modelValue.stringValue = provider
+                }
+            } else {
+                modelValue.stringValue = "未检测到模型"
+            }
         } else {
-            workerValue.stringValue = "无法连接 127.0.0.1:37701"
-            workerMetaValue.stringValue = "请确认 claude-mem worker 已启动"
-            aiValue.stringValue = "AI 状态暂无"
+            versionValue.stringValue = "--"
+            pidValue.stringValue = "--"
+            uptimeValue.stringValue = "--"
+            mcpValue.stringValue = "未连接"
+            mcpValue.textColor = Theme.offline
+            modelValue.stringValue = "无法连接 127.0.0.1:37701"
         }
 
         memoryValue.stringValue = "\(counts.observations)"
         sessionValue.stringValue = "\(counts.sessions)"
         summaryValue.stringValue = "\(counts.summaries)"
-        projectsValue.stringValue = counts.projects.isEmpty ? "暂无项目记忆" : counts.projects.prefix(2).joined(separator: "、")
+        projectsValue.stringValue = counts.projects.isEmpty
+            ? "暂无项目记忆"
+            : counts.projects.prefix(2).joined(separator: "、")
 
         if let title = counts.lastTitle, !title.isEmpty {
             latestValue.stringValue = title
         } else {
-            latestValue.stringValue = "暂无记忆。若一直为空，请确认 Claude Code 已登录。"
+            latestValue.stringValue = "暂无记忆，请确认 Claude Code 已登录"
         }
 
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
-        updatedValue.stringValue = formatter.string(from: refreshedAt)
+        updatedValue.stringValue = "更新于 \(formatter.string(from: refreshedAt))"
     }
 
     private func position(relativeTo button: NSStatusBarButton) {
@@ -174,21 +290,20 @@ final class DashboardWindowController: NSWindowController {
             window?.center()
             return
         }
-
         let screen = buttonWindow.screen ?? NSScreen.main
         guard let visibleFrame = screen?.visibleFrame else {
             window.center()
             return
         }
-
         let buttonFrameInWindow = button.convert(button.bounds, to: nil)
         let buttonFrame = buttonWindow.convertToScreen(buttonFrameInWindow)
         var originX = buttonFrame.midX - window.frame.width / 2
         originX = max(visibleFrame.minX + 8, min(originX, visibleFrame.maxX - window.frame.width - 8))
-
         let originY = visibleFrame.maxY - window.frame.height - 8
         window.setFrameOrigin(NSPoint(x: originX, y: originY))
     }
+
+    // MARK: Build
 
     private func buildContent(
         actionTarget: AnyObject,
@@ -199,38 +314,47 @@ final class DashboardWindowController: NSWindowController {
         logsSelector: Selector,
         quitSelector: Selector
     ) -> NSView {
-        let root = NSView()
-        root.wantsLayer = true
-        root.layer?.backgroundColor = panelBackground.cgColor
-        root.layer?.cornerRadius = 18
-        root.layer?.cornerCurve = .continuous
-        root.layer?.borderColor = NSColor(calibratedWhite: 0.76, alpha: 0.72).cgColor
-        root.layer?.borderWidth = 1
-        root.layer?.shadowColor = NSColor.black.cgColor
-        root.layer?.shadowOpacity = 0.20
-        root.layer?.shadowRadius = 24
-        root.layer?.shadowOffset = CGSize(width: 0, height: -8)
+        let container = NSView()
+        container.wantsLayer = true
+        container.layer?.cornerRadius = 16
+        container.layer?.cornerCurve = .continuous
+        container.layer?.masksToBounds = true
+        container.layer?.borderColor = Theme.cardBorder.cgColor
+        container.layer?.borderWidth = 1
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let blur = NSVisualEffectView()
+        blur.material = .popover
+        blur.blendingMode = .behindWindow
+        blur.state = .active
+        blur.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(blur)
 
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        stack.spacing = 13
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 14, right: 16)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(stack)
+        container.addSubview(stack)
 
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: root.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor)
+            container.widthAnchor.constraint(equalToConstant: panelWidth),
+            blur.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            blur.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            blur.topAnchor.constraint(equalTo: container.topAnchor),
+            blur.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: container.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
 
         stack.addArrangedSubview(header())
-        stack.addArrangedSubview(statusSection())
-        stack.addArrangedSubview(memorySection())
-        stack.addArrangedSubview(contentSection())
-        stack.addArrangedSubview(actionsSection(
+        stack.addArrangedSubview(statsCard())
+        stack.addArrangedSubview(runtimeCard())
+        stack.addArrangedSubview(activityCard())
+        stack.addArrangedSubview(actionsCard(
             target: actionTarget,
             openSelector: openSelector,
             copySelector: copySelector,
@@ -239,110 +363,142 @@ final class DashboardWindowController: NSWindowController {
             logsSelector: logsSelector,
             quitSelector: quitSelector
         ))
+        stack.addArrangedSubview(footer())
 
-        return root
+        return container
     }
 
     private func header() -> NSView {
-        let icon = iconTile(symbol: "brain.head.profile", size: 40, symbolSize: 24)
+        let icon = iconTile(symbol: "brain.head.profile", size: 38, symbolSize: 21)
 
-        let title = label("ClaudeMem 监控", size: 20, weight: .bold)
-        title.textColor = darkText
-        title.maximumNumberOfLines = 1
-
-        let subtitle = label("状态、记忆和常用入口", size: 12, weight: .medium)
-        subtitle.textColor = mutedText.withAlphaComponent(0.92)
-        subtitle.maximumNumberOfLines = 1
+        let title = label("ClaudeMem", size: 16, weight: .bold)
+        title.textColor = .labelColor
+        let subtitle = label("记忆监控面板", size: 11.5, weight: .medium)
+        subtitle.textColor = .secondaryLabelColor
 
         let copy = NSStackView(views: [title, subtitle])
         copy.orientation = .vertical
         copy.alignment = .leading
-        copy.spacing = 3
+        copy.spacing = 1
 
-        let row = NSStackView(views: [icon, copy])
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let row = NSStackView(views: [icon, copy, spacer, headerStatusPill()])
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.spacing = 12
+        row.spacing = 11
         row.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            row.widthAnchor.constraint(equalToConstant: panelWidth - 32),
-            row.heightAnchor.constraint(equalToConstant: 44)
+            row.widthAnchor.constraint(equalToConstant: contentWidth)
         ])
         return row
     }
 
-    private func statusSection() -> NSView {
-        let top = NSStackView(views: [statusPill(), updatedLine()])
-        top.orientation = .horizontal
-        top.alignment = .centerY
-        top.distribution = .equalSpacing
-        top.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            top.widthAnchor.constraint(equalToConstant: panelWidth - 62)
-        ])
+    private func headerStatusPill() -> NSView {
+        let pill = statusPillView
+        pill.wantsLayer = true
+        pill.layer?.backgroundColor = Theme.online.withAlphaComponent(0.16).cgColor
+        pill.layer?.cornerRadius = 12
+        pill.layer?.cornerCurve = .continuous
+        pill.translatesAutoresizingMaskIntoConstraints = false
 
-        workerValue.font = .systemFont(ofSize: 12, weight: .semibold)
-        workerValue.textColor = darkText
-        workerValue.maximumNumberOfLines = 1
-        workerValue.lineBreakMode = .byTruncatingTail
+        statusDot.wantsLayer = true
+        statusDot.layer?.backgroundColor = Theme.online.cgColor
+        statusDot.layer?.cornerRadius = 4
+        statusDot.translatesAutoresizingMaskIntoConstraints = false
 
-        workerMetaValue.font = .systemFont(ofSize: 11, weight: .medium)
-        workerMetaValue.textColor = mutedText
-        workerMetaValue.maximumNumberOfLines = 1
-        workerMetaValue.lineBreakMode = .byTruncatingTail
+        statusBadge.font = .systemFont(ofSize: 12, weight: .semibold)
+        statusBadge.textColor = Theme.online
 
-        aiValue.font = .systemFont(ofSize: 10.5, weight: .regular)
-        aiValue.textColor = mutedText
-        aiValue.maximumNumberOfLines = 1
-        aiValue.lineBreakMode = .byTruncatingMiddle
-
-        let body = NSStackView(views: [top, workerValue, workerMetaValue, aiValue])
-        body.orientation = .vertical
-        body.alignment = .leading
-        body.spacing = 5
-        return sectionCard(title: "运行状态", symbol: "cpu", content: body, height: 112)
-    }
-
-    private func memorySection() -> NSView {
-        let row = NSStackView(views: [
-            metricTile(title: "记忆", value: memoryValue),
-            metricTile(title: "会话", value: sessionValue),
-            metricTile(title: "摘要", value: summaryValue)
-        ])
+        let row = NSStackView(views: [statusDot, statusBadge])
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.distribution = .fillEqually
-        row.spacing = 4
+        row.spacing = 6
+        row.translatesAutoresizingMaskIntoConstraints = false
+        pill.addSubview(row)
+
+        NSLayoutConstraint.activate([
+            pill.heightAnchor.constraint(equalToConstant: 24),
+            statusDot.widthAnchor.constraint(equalToConstant: 8),
+            statusDot.heightAnchor.constraint(equalToConstant: 8),
+            row.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 10),
+            row.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -10),
+            row.centerYAnchor.constraint(equalTo: pill.centerYAnchor)
+        ])
+        return pill
+    }
+
+    private func statsCard() -> NSView {
+        let memory = statTile(memoryValue, "记忆")
+        let session = statTile(sessionValue, "会话")
+        let summary = statTile(summaryValue, "摘要")
+
+        let row = NSStackView(views: [memory, divider(), session, divider(), summary])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 0
         row.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            row.widthAnchor.constraint(equalToConstant: panelWidth - 58)
+            session.widthAnchor.constraint(equalTo: memory.widthAnchor),
+            summary.widthAnchor.constraint(equalTo: memory.widthAnchor)
         ])
-        return sectionCard(title: "记忆概览", symbol: "externaldrive.connected.to.line.below", content: row, height: 90, highlighted: true)
+
+        let container = NSView()
+        container.wantsLayer = true
+        container.layer?.cornerRadius = 13
+        container.layer?.cornerCurve = .continuous
+        container.layer?.backgroundColor = Theme.accentSoft.cgColor
+        container.layer?.borderColor = Theme.accent.withAlphaComponent(0.22).cgColor
+        container.layer?.borderWidth = 1
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(row)
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(equalToConstant: contentWidth),
+            row.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
+            row.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6),
+            row.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
+            row.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12)
+        ])
+        return container
     }
 
-    private func contentSection() -> NSView {
-        projectsValue.font = .systemFont(ofSize: 12, weight: .medium)
-        projectsValue.textColor = mutedText
-        projectsValue.maximumNumberOfLines = 1
-        projectsValue.lineBreakMode = .byTruncatingTail
+    private func runtimeCard() -> NSView {
+        configureValue(versionValue, weight: .semibold)
+        configureValue(pidValue, weight: .semibold)
+        configureValue(uptimeValue, weight: .semibold)
+        configureValue(mcpValue, weight: .semibold)
+        configureValue(modelValue, weight: .medium)
+        modelValue.textColor = .secondaryLabelColor
 
-        latestValue.font = .systemFont(ofSize: 12, weight: .regular)
-        latestValue.textColor = mutedText
-        latestValue.maximumNumberOfLines = 2
-        latestValue.lineBreakMode = .byTruncatingTail
-
-        let body = NSStackView(views: [
-            keyValueRow("项目", projectsValue),
-            separator(),
-            keyValueRow("最近", latestValue)
+        let rows = NSStackView(views: [
+            infoRow(infoCell("版本", versionValue), infoCell("PID", pidValue)),
+            infoRow(infoCell("运行", uptimeValue), infoCell("MCP", mcpValue)),
+            infoCell("模型", modelValue)
         ])
-        body.orientation = .vertical
-        body.alignment = .leading
-        body.spacing = 8
-        return sectionCard(title: "内容", symbol: "folder", content: body, height: 92)
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 8
+        return card(title: "运行状态", symbol: "cpu", content: rows)
     }
 
-    private func actionsSection(
+    private func activityCard() -> NSView {
+        configureValue(projectsValue, weight: .medium)
+        projectsValue.textColor = .secondaryLabelColor
+        configureValue(latestValue, weight: .medium)
+        latestValue.textColor = .secondaryLabelColor
+
+        let rows = NSStackView(views: [
+            infoCell("项目", projectsValue),
+            infoCell("最近", latestValue)
+        ])
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 8
+        return card(title: "最近活动", symbol: "clock.arrow.circlepath", content: rows)
+    }
+
+    private func actionsCard(
         target: AnyObject,
         openSelector: Selector,
         copySelector: Selector,
@@ -351,212 +507,174 @@ final class DashboardWindowController: NSWindowController {
         logsSelector: Selector,
         quitSelector: Selector
     ) -> NSView {
-        let row1 = actionRow([
-            actionButton("在线", symbol: "arrow.up.right.square", target: target, action: openSelector),
-            actionButton("复制", symbol: "link", target: target, action: copySelector),
-            actionButton("刷新", symbol: "arrow.clockwise", target: target, action: refreshSelector)
+        let row1 = tileRow([
+            ActionTile(title: "在线", symbol: "safari", tint: Theme.accent, target: target, action: openSelector),
+            ActionTile(title: "复制", symbol: "link", tint: .labelColor, target: target, action: copySelector),
+            ActionTile(title: "刷新", symbol: "arrow.clockwise", tint: .labelColor, target: target, action: refreshSelector)
         ])
-        let row2 = actionRow([
-            actionButton("重启", symbol: "arrow.triangle.2.circlepath", target: target, action: restartSelector),
-            actionButton("日志", symbol: "doc.text", target: target, action: logsSelector),
-            actionButton("退出", symbol: "power", target: target, action: quitSelector)
+        let row2 = tileRow([
+            ActionTile(title: "重启", symbol: "arrow.triangle.2.circlepath", tint: Theme.warning, target: target, action: restartSelector),
+            ActionTile(title: "日志", symbol: "doc.text", tint: .labelColor, target: target, action: logsSelector),
+            ActionTile(title: "退出", symbol: "power", tint: Theme.offline, target: target, action: quitSelector)
         ])
-
-        let body = NSStackView(views: [row1, row2])
-        body.orientation = .vertical
-        body.alignment = .leading
-        body.spacing = 7
-        return sectionCard(title: "快捷入口", symbol: "square.grid.2x2", content: body, height: 106)
+        let rows = NSStackView(views: [row1, row2])
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 8
+        return card(title: "快捷操作", symbol: "square.grid.2x2", content: rows)
     }
 
-    private func statusPill() -> NSView {
-        let pill = statusPillView
-        pill.wantsLayer = true
-        pill.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.16).cgColor
-        pill.layer?.cornerRadius = 13
-        pill.layer?.cornerCurve = .continuous
-        pill.translatesAutoresizingMaskIntoConstraints = false
+    private func footer() -> NSView {
+        let clock = symbol("clock", pointSize: 11, weight: .regular, color: .tertiaryLabelColor)
+        updatedValue.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        updatedValue.textColor = .tertiaryLabelColor
 
-        statusDot.wantsLayer = true
-        statusDot.layer?.backgroundColor = NSColor.systemGreen.cgColor
-        statusDot.layer?.cornerRadius = 5
-        statusDot.translatesAutoresizingMaskIntoConstraints = false
-
-        statusBadge.font = .systemFont(ofSize: 13, weight: .semibold)
-        statusBadge.textColor = .systemGreen
-
-        let row = NSStackView(views: [statusDot, statusBadge])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        row.translatesAutoresizingMaskIntoConstraints = false
-        pill.addSubview(row)
-
-        NSLayoutConstraint.activate([
-            pill.widthAnchor.constraint(equalToConstant: 84),
-            pill.heightAnchor.constraint(equalToConstant: 26),
-            row.centerXAnchor.constraint(equalTo: pill.centerXAnchor),
-            row.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
-            statusDot.widthAnchor.constraint(equalToConstant: 10),
-            statusDot.heightAnchor.constraint(equalToConstant: 10)
-        ])
-
-        return pill
-    }
-
-    private func updatedLine() -> NSView {
-        let clock = symbol("clock", pointSize: 12, weight: .regular, color: mutedText)
-        let prefix = label("更新", size: 12, weight: .regular)
-        prefix.textColor = mutedText
-        updatedValue.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-        updatedValue.textColor = mutedText
-
-        let row = NSStackView(views: [clock, prefix, updatedValue])
+        let row = NSStackView(views: [clock, updatedValue])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 5
+        row.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            row.widthAnchor.constraint(equalToConstant: contentWidth)
+        ])
         return row
     }
 
-    private func sectionCard(title: String, symbol symbolName: String, content: NSView, height: CGFloat, highlighted: Bool = false) -> NSView {
+    // MARK: Components
+
+    private func card(title: String, symbol symbolName: String, content: NSView) -> NSView {
         let container = NSView()
         container.wantsLayer = true
         container.layer?.cornerRadius = 13
         container.layer?.cornerCurve = .continuous
-        container.layer?.backgroundColor = cardBackground.cgColor
-        container.layer?.borderColor = (highlighted ? accent.withAlphaComponent(0.62) : NSColor(calibratedWhite: 0.82, alpha: 0.82)).cgColor
-        container.layer?.borderWidth = highlighted ? 1.25 : 1
-        container.layer?.shadowColor = NSColor.black.cgColor
-        container.layer?.shadowOpacity = highlighted ? 0.07 : 0.055
-        container.layer?.shadowRadius = highlighted ? 10 : 8
-        container.layer?.shadowOffset = CGSize(width: 0, height: -3)
+        container.layer?.backgroundColor = Theme.cardFill.cgColor
+        container.layer?.borderColor = Theme.cardBorder.cgColor
+        container.layer?.borderWidth = 1
         container.translatesAutoresizingMaskIntoConstraints = false
 
-        let titleLabel = label(title, size: 12, weight: .semibold)
-        titleLabel.textColor = darkText
-
-        let titleRow = NSStackView(views: [symbol(symbolName, pointSize: 13, weight: .semibold, color: accent), titleLabel])
+        let titleLabel = label(title, size: 11.5, weight: .semibold)
+        titleLabel.textColor = .secondaryLabelColor
+        let titleRow = NSStackView(views: [
+            symbol(symbolName, pointSize: 12, weight: .semibold, color: Theme.accent),
+            titleLabel
+        ])
         titleRow.orientation = .horizontal
         titleRow.alignment = .centerY
-        titleRow.spacing = 7
+        titleRow.spacing = 6
 
         let stack = NSStackView(views: [titleRow, content])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 9, right: 12)
+        stack.spacing = 9
+        stack.edgeInsets = NSEdgeInsets(top: 11, left: 12, bottom: 11, right: 12)
         stack.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(stack)
 
         NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: panelWidth - 32),
-            container.heightAnchor.constraint(equalToConstant: height),
+            container.widthAnchor.constraint(equalToConstant: contentWidth),
             stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             stack.topAnchor.constraint(equalTo: container.topAnchor),
             stack.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
-
         return container
     }
 
-    private func metricTile(title: String, value: NSTextField) -> NSView {
-        value.font = .systemFont(ofSize: 25, weight: .bold)
-        value.textColor = accent
+    private func statTile(_ value: NSTextField, _ title: String) -> NSView {
+        value.font = Theme.roundedFont(26, .bold)
+        value.textColor = Theme.accent
         value.alignment = .center
 
         let titleLabel = label(title, size: 11, weight: .medium)
-        titleLabel.textColor = mutedText
+        titleLabel.textColor = .secondaryLabelColor
         titleLabel.alignment = .center
 
         let stack = NSStackView(views: [value, titleLabel])
         stack.orientation = .vertical
         stack.alignment = .centerX
-        stack.spacing = 1
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            stack.heightAnchor.constraint(equalToConstant: 50)
-        ])
+        stack.spacing = 2
         return stack
     }
 
-    private func keyValueRow(_ key: String, _ value: NSTextField) -> NSView {
-        let keyLabel = label(key, size: 12, weight: .semibold)
-        keyLabel.textColor = darkText
+    private func infoCell(_ key: String, _ value: NSTextField) -> NSView {
+        let keyLabel = label(key, size: 12, weight: .medium)
+        keyLabel.textColor = .tertiaryLabelColor
         keyLabel.translatesAutoresizingMaskIntoConstraints = false
+        keyLabel.setContentHuggingPriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([
-            keyLabel.widthAnchor.constraint(equalToConstant: 40)
+            keyLabel.widthAnchor.constraint(equalToConstant: 34)
         ])
 
         let row = NSStackView(views: [keyLabel, value])
         row.orientation = .horizontal
-        row.alignment = .firstBaseline
+        row.alignment = .centerY
+        row.spacing = 8
+        return row
+    }
+
+    private func infoRow(_ left: NSView, _ right: NSView) -> NSView {
+        let row = NSStackView(views: [left, right])
+        row.orientation = .horizontal
+        row.distribution = .fillEqually
+        row.alignment = .centerY
         row.spacing = 10
         row.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            row.widthAnchor.constraint(equalToConstant: panelWidth - 62)
+            row.widthAnchor.constraint(equalToConstant: cardInnerWidth)
         ])
         return row
     }
 
-    private func actionRow(_ buttons: [NSButton]) -> NSStackView {
-        let row = NSStackView(views: buttons)
+    private func tileRow(_ tiles: [ActionTile]) -> NSView {
+        let row = NSStackView(views: tiles)
         row.orientation = .horizontal
+        row.distribution = .fillEqually
         row.alignment = .centerY
-        row.spacing = 7
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            row.widthAnchor.constraint(equalToConstant: cardInnerWidth)
+        ])
         return row
     }
 
-    private func actionButton(_ title: String, symbol symbolName: String, target: AnyObject, action: Selector) -> NSButton {
-        let button = ToolbarButton(title: title, target: target, action: action)
-        button.font = .systemFont(ofSize: 12, weight: .semibold)
-        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: title)?.withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
-        button.imagePosition = .imageLeading
-        button.imageHugsTitle = false
-        button.contentTintColor = NSColor(calibratedRed: 0.18, green: 0.20, blue: 0.27, alpha: 1.0)
-        button.wantsLayer = true
-        button.layer?.backgroundColor = controlBackground.cgColor
-        button.layer?.cornerRadius = 7
-        button.layer?.cornerCurve = .continuous
-        button.isBordered = false
-        button.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 101),
-            button.heightAnchor.constraint(equalToConstant: 29)
-        ])
-        return button
+    private func configureValue(_ field: NSTextField, weight: NSFont.Weight) {
+        field.font = .systemFont(ofSize: 12.5, weight: weight)
+        field.textColor = .labelColor
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byTruncatingTail
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
     }
 
     private func iconTile(symbol symbolName: String, size: CGFloat, symbolSize: CGFloat) -> NSView {
         let tile = NSView()
         tile.wantsLayer = true
-        tile.layer?.backgroundColor = accentSoft.cgColor
-        tile.layer?.cornerRadius = 11
+        tile.layer?.backgroundColor = Theme.accentSoft.cgColor
+        tile.layer?.cornerRadius = 10
         tile.layer?.cornerCurve = .continuous
         tile.translatesAutoresizingMaskIntoConstraints = false
 
-        let image = symbol(symbolName, pointSize: symbolSize, weight: .semibold, color: accent)
+        let image = symbol(symbolName, pointSize: symbolSize, weight: .semibold, color: Theme.accent)
         image.translatesAutoresizingMaskIntoConstraints = false
         tile.addSubview(image)
-
         NSLayoutConstraint.activate([
             tile.widthAnchor.constraint(equalToConstant: size),
             tile.heightAnchor.constraint(equalToConstant: size),
             image.centerXAnchor.constraint(equalTo: tile.centerXAnchor),
             image.centerYAnchor.constraint(equalTo: tile.centerYAnchor)
         ])
-
         return tile
     }
 
-    private func separator() -> NSView {
+    private func divider() -> NSView {
         let line = NSView()
         line.wantsLayer = true
-        line.layer?.backgroundColor = NSColor(calibratedWhite: 0.78, alpha: 0.55).cgColor
+        line.layer?.backgroundColor = Theme.cardBorder.cgColor
         line.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            line.widthAnchor.constraint(equalToConstant: panelWidth - 62),
-            line.heightAnchor.constraint(equalToConstant: 1)
+            line.widthAnchor.constraint(equalToConstant: 1),
+            line.heightAnchor.constraint(equalToConstant: 30)
         ])
         return line
     }
@@ -574,9 +692,8 @@ final class DashboardWindowController: NSWindowController {
     private func label(_ text: String, size: CGFloat, weight: NSFont.Weight) -> NSTextField {
         let label = NSTextField(labelWithString: text)
         label.font = .systemFont(ofSize: size, weight: weight)
-        label.maximumNumberOfLines = 0
-        label.lineBreakMode = .byWordWrapping
-        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.maximumNumberOfLines = 1
+        label.lineBreakMode = .byTruncatingTail
         return label
     }
 
@@ -585,11 +702,13 @@ final class DashboardWindowController: NSWindowController {
         let minutes = seconds / 60
         if minutes < 60 { return "\(minutes) 分钟" }
         let hours = minutes / 60
-        if hours < 24 { return "\(hours) 小时 \(minutes % 60) 分钟" }
+        if hours < 24 { return "\(hours) 小时" }
         let days = hours / 24
         return "\(days) 天 \(hours % 24) 小时"
     }
 }
+
+// MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
@@ -623,12 +742,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "brain.head.profile", accessibilityDescription: "ClaudeMemBar")
+            button.image = NSImage(systemSymbolName: "brain.head.profile", accessibilityDescription: appName)
             button.imagePosition = .imageLeading
             button.title = " 记忆"
-            button.toolTip = "ClaudeMemBar"
+            button.toolTip = appName
             button.target = self
             button.action = #selector(toggleDashboard)
         }
@@ -709,7 +827,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func fetchHealth(completion: @escaping (Health?) -> Void) {
         var request = URLRequest(url: healthURL)
         request.timeoutInterval = 3
-
         URLSession.shared.dataTask(with: request) { data, _, _ in
             guard let data else {
                 completion(nil)
@@ -737,7 +854,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for line in output.split(separator: "\n").map(String.init) {
             let parts = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
             guard let key = parts.first else { continue }
-
             switch key {
             case "observations":
                 counts.observations = Int(parts.dropFirst().first ?? "0") ?? 0
@@ -756,7 +872,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 continue
             }
         }
-
         return counts
     }
 
@@ -768,7 +883,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: statusText)
             button.title = lastCounts.observations > 0 ? " \(lastCounts.observations)" : " 记忆"
-            button.toolTip = "ClaudeMemBar: \(statusText)"
+            button.toolTip = "\(appName): \(statusText)"
         }
         dashboard.update(health: lastHealth, counts: lastCounts, refreshedAt: lastRefresh)
     }
@@ -776,7 +891,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setTransientStatus(_ title: String) {
         if let button = statusItem.button {
             button.title = " ..."
-            button.toolTip = "ClaudeMemBar: \(title)"
+            button.toolTip = "\(appName): \(title)"
         }
     }
 
