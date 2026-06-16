@@ -54,7 +54,7 @@ final class ToolbarButton: NSButton {
 
 final class DashboardWindowController: NSWindowController {
     private let panelWidth: CGFloat = 376
-    private let panelHeight: CGFloat = 506
+    private let panelHeight: CGFloat = 512
     private let accent = NSColor(calibratedRed: 0.41, green: 0.24, blue: 0.90, alpha: 1.0)
     private let accentSoft = NSColor(calibratedRed: 0.93, green: 0.90, blue: 1.0, alpha: 1.0)
     private let panelBackground = NSColor(calibratedRed: 0.965, green: 0.972, blue: 0.985, alpha: 0.98)
@@ -67,6 +67,7 @@ final class DashboardWindowController: NSWindowController {
     private let statusPillView = NSView()
     private let statusBadge = NSTextField(labelWithString: "检查中")
     private let workerValue = NSTextField(labelWithString: "--")
+    private let workerMetaValue = NSTextField(labelWithString: "--")
     private let aiValue = NSTextField(labelWithString: "--")
     private let memoryValue = NSTextField(labelWithString: "0")
     private let sessionValue = NSTextField(labelWithString: "0")
@@ -143,10 +144,12 @@ final class DashboardWindowController: NSWindowController {
             let pid = health.pid.map(String.init) ?? "--"
             let uptime = formatUptime(health.uptime ?? 0)
             let mcp = health.mcpReady == true ? "MCP 就绪" : "MCP 未就绪"
-            workerValue.stringValue = "v\(version) · PID \(pid) · \(uptime) · \(mcp)"
+            workerValue.stringValue = "v\(version) · PID \(pid)"
+            workerMetaValue.stringValue = "\(uptime) · \(mcp)"
             aiValue.stringValue = "\(health.ai?.provider ?? "unknown") · \(health.ai?.authMethod ?? "未检测到认证信息")"
         } else {
             workerValue.stringValue = "无法连接 127.0.0.1:37701"
+            workerMetaValue.stringValue = "请确认 claude-mem worker 已启动"
             aiValue.stringValue = "AI 状态暂无"
         }
 
@@ -211,7 +214,7 @@ final class DashboardWindowController: NSWindowController {
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 9
+        stack.spacing = 8
         stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
         stack.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(stack)
@@ -248,7 +251,7 @@ final class DashboardWindowController: NSWindowController {
         title.maximumNumberOfLines = 1
 
         let subtitle = label("状态、记忆和常用入口", size: 12, weight: .medium)
-        subtitle.textColor = mutedText
+        subtitle.textColor = mutedText.withAlphaComponent(0.92)
         subtitle.maximumNumberOfLines = 1
 
         let copy = NSStackView(views: [title, subtitle])
@@ -283,16 +286,21 @@ final class DashboardWindowController: NSWindowController {
         workerValue.maximumNumberOfLines = 1
         workerValue.lineBreakMode = .byTruncatingTail
 
-        aiValue.font = .systemFont(ofSize: 11, weight: .regular)
+        workerMetaValue.font = .systemFont(ofSize: 11, weight: .medium)
+        workerMetaValue.textColor = mutedText
+        workerMetaValue.maximumNumberOfLines = 1
+        workerMetaValue.lineBreakMode = .byTruncatingTail
+
+        aiValue.font = .systemFont(ofSize: 10.5, weight: .regular)
         aiValue.textColor = mutedText
         aiValue.maximumNumberOfLines = 1
-        aiValue.lineBreakMode = .byTruncatingTail
+        aiValue.lineBreakMode = .byTruncatingMiddle
 
-        let body = NSStackView(views: [top, workerValue, aiValue])
+        let body = NSStackView(views: [top, workerValue, workerMetaValue, aiValue])
         body.orientation = .vertical
         body.alignment = .leading
-        body.spacing = 6
-        return sectionCard(title: "运行状态", symbol: "cpu", content: body, height: 104)
+        body.spacing = 5
+        return sectionCard(title: "运行状态", symbol: "cpu", content: body, height: 112)
     }
 
     private func memorySection() -> NSView {
@@ -303,8 +311,13 @@ final class DashboardWindowController: NSWindowController {
         ])
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.spacing = 6
-        return sectionCard(title: "记忆概览", symbol: "externaldrive.connected.to.line.below", content: row, height: 84, highlighted: true)
+        row.distribution = .fillEqually
+        row.spacing = 4
+        row.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            row.widthAnchor.constraint(equalToConstant: panelWidth - 58)
+        ])
+        return sectionCard(title: "记忆概览", symbol: "externaldrive.connected.to.line.below", content: row, height: 90, highlighted: true)
     }
 
     private func contentSection() -> NSView {
@@ -326,7 +339,7 @@ final class DashboardWindowController: NSWindowController {
         body.orientation = .vertical
         body.alignment = .leading
         body.spacing = 8
-        return sectionCard(title: "内容", symbol: "folder", content: body, height: 94)
+        return sectionCard(title: "内容", symbol: "folder", content: body, height: 92)
     }
 
     private func actionsSection(
@@ -352,8 +365,8 @@ final class DashboardWindowController: NSWindowController {
         let body = NSStackView(views: [row1, row2])
         body.orientation = .vertical
         body.alignment = .leading
-        body.spacing = 8
-        return sectionCard(title: "快捷入口", symbol: "square.grid.2x2", content: body, height: 110)
+        body.spacing = 7
+        return sectionCard(title: "快捷入口", symbol: "square.grid.2x2", content: body, height: 106)
     }
 
     private func statusPill() -> NSView {
@@ -430,8 +443,8 @@ final class DashboardWindowController: NSWindowController {
         let stack = NSStackView(views: [titleRow, content])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 7
-        stack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 9, right: 12)
         stack.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(stack)
 
@@ -462,7 +475,6 @@ final class DashboardWindowController: NSWindowController {
         stack.spacing = 1
         stack.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            stack.widthAnchor.constraint(equalToConstant: 100),
             stack.heightAnchor.constraint(equalToConstant: 50)
         ])
         return stack
@@ -501,7 +513,7 @@ final class DashboardWindowController: NSWindowController {
         button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: title)?.withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
         button.imagePosition = .imageLeading
         button.imageHugsTitle = false
-        button.contentTintColor = darkText
+        button.contentTintColor = NSColor(calibratedRed: 0.18, green: 0.20, blue: 0.27, alpha: 1.0)
         button.wantsLayer = true
         button.layer?.backgroundColor = controlBackground.cgColor
         button.layer?.cornerRadius = 7
@@ -509,8 +521,8 @@ final class DashboardWindowController: NSWindowController {
         button.isBordered = false
         button.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 103),
-            button.heightAnchor.constraint(equalToConstant: 28)
+            button.widthAnchor.constraint(equalToConstant: 101),
+            button.heightAnchor.constraint(equalToConstant: 29)
         ])
         return button
     }
@@ -540,7 +552,7 @@ final class DashboardWindowController: NSWindowController {
     private func separator() -> NSView {
         let line = NSView()
         line.wantsLayer = true
-        line.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.7).cgColor
+        line.layer?.backgroundColor = NSColor(calibratedWhite: 0.78, alpha: 0.55).cgColor
         line.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             line.widthAnchor.constraint(equalToConstant: panelWidth - 62),
