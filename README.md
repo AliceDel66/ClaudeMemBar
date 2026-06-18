@@ -12,7 +12,7 @@ ClaudeMemBar 是一个轻量级 macOS 顶部菜单栏看板，用来快速查看
 - 点击「记忆」或「摘要」在面板内查看最近条目列表，再点单条查看完整详情
 - 切换 claude-mem 记忆生成语言（中文 / English，默认中文）
 - 显示最近项目和最近记忆
-- 右滑切换到系统页，查看本机内存、负载、可用温度读数
+- 右滑切换到轻量系统页，查看本机 CPU、内存、磁盘、负载和可用温度读数
 - 汇总本机 claude-mem 记录到的 Codex、Claude Code、Claude CLI、Codex CLI 等来源 Token 消耗
 - 展示 claude-mem 基于本机记忆压缩估算节省的 Token
 - 一键打开 claude-mem 在线页面
@@ -106,8 +106,8 @@ dist/release/ClaudeMemBar-x.y.z-macOS.zip
 推送 `v*` tag 后，GitHub Actions 会自动构建这些安装包并上传到 GitHub Release：
 
 ```sh
-git tag v1.2.0
-git push origin v1.2.0
+git tag v1.2.1
+git push origin v1.2.1
 ```
 
 ## 使用
@@ -135,8 +135,9 @@ git push origin v1.2.0
 
 在主面板上横向滑动可切换到第二页。第二页包含：
 
-- `电脑状态`：CPU 温度、GPU 温度、内存占用、系统负载
-- `Token 汇总`：本机全平台总 Token、已节省 Token、读取成本、节省率、来源拆分
+- `顶部摘要`：全平台 Token、节省率、内存占用
+- `系统资源`：CPU 占用、内存占用、磁盘占用、系统负载、可用温度状态
+- `Token 经济`：本机全平台总 Token、已节省 Token、读取成本、节省率、来源拆分
 
 Token 数据来自本机 `~/.claude-mem/claude-mem.db`：
 
@@ -144,7 +145,14 @@ Token 数据来自本机 `~/.claude-mem/claude-mem.db`：
 - 来源按 claude-mem 会话来源汇总，例如 Codex、Claude / CLI
 - 已节省 Token 为 claude-mem 生成记忆的工作量减去本机记忆文本读取成本的估算值
 
-macOS 默认不开放完整温度传感器接口。ClaudeMemBar 会自动尝试读取本机已安装的 `osx-cpu-temp` 或 `istats`；如果机器上没有这些工具，温度项会显示 `不可用`，内存和负载仍会正常显示。
+第二页按轻量化策略采样：
+
+- 常规系统指标每 30 秒刷新一次
+- Token 汇总每 60 秒刷新一次
+- 温度最多每 120 秒尝试读取一次
+- 不调用需要 `sudo` 的 `powermetrics`
+
+macOS 默认不开放完整温度传感器接口。ClaudeMemBar 会自动尝试读取本机已安装的 `osx-cpu-temp` 或 `istats`；如果机器上没有这些工具，温度项会显示 `需工具`，CPU、内存、磁盘、负载和 Token 汇总仍会正常显示。
 
 ### 查看记忆与摘要详情
 

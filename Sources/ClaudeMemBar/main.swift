@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 
 private let appName = "ClaudeMemBar"
@@ -47,10 +48,13 @@ struct Counts {
 }
 
 struct SystemStats {
-    var cpuTemperature: String = "不可用"
-    var gpuTemperature: String = "不可用"
+    var cpuUsage: String = "--"
+    var cpuTemperature: String = "需工具"
+    var gpuTemperature: String = "需工具"
     var memoryUsage: String = "--"
     var memoryDetail: String = "等待刷新"
+    var diskUsage: String = "--"
+    var diskDetail: String = "等待刷新"
     var loadAverage: String = "--"
 }
 
@@ -365,6 +369,53 @@ final class PagingHostView: NSView {
     }
 }
 
+final class ProgressBarView: NSView {
+    var value: Double = 0 {
+        didSet { updateFill() }
+    }
+
+    private let fillView = NSView()
+    private var fillWidth: NSLayoutConstraint?
+
+    init(color: NSColor) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.cornerRadius = 2
+        layer?.cornerCurve = .continuous
+        layer?.backgroundColor = Theme.controlFill.cgColor
+
+        fillView.wantsLayer = true
+        fillView.layer?.cornerRadius = 2
+        fillView.layer?.cornerCurve = .continuous
+        fillView.layer?.backgroundColor = color.cgColor
+        fillView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(fillView)
+
+        let width = fillView.widthAnchor.constraint(equalToConstant: 0)
+        fillWidth = width
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 4),
+            fillView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            fillView.topAnchor.constraint(equalTo: topAnchor),
+            fillView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            width
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layout() {
+        super.layout()
+        updateFill()
+    }
+
+    private func updateFill() {
+        let clamped = max(0, min(100, value))
+        fillWidth?.constant = bounds.width * CGFloat(clamped / 100.0)
+    }
+}
+
 final class FlippedStack: NSStackView {
     override var isFlipped: Bool { true }
 }
@@ -395,10 +446,17 @@ final class DashboardWindowController: NSWindowController {
     private let updatedValue = NSTextField(labelWithString: "--")
     private let systemUpdatedValue = NSTextField(labelWithString: "--")
 
-    private let cpuTempValue = NSTextField(labelWithString: "不可用")
-    private let gpuTempValue = NSTextField(labelWithString: "不可用")
+    private let topTokenValue = NSTextField(labelWithString: "0")
+    private let topSavingValue = NSTextField(labelWithString: "0%")
+    private let topMemoryValue = NSTextField(labelWithString: "--")
+
+    private let cpuUsageValue = NSTextField(labelWithString: "--")
+    private let cpuTempValue = NSTextField(labelWithString: "需工具")
+    private let gpuTempValue = NSTextField(labelWithString: "需工具")
     private let memoryUsageValue = NSTextField(labelWithString: "--")
     private let memoryDetailValue = NSTextField(labelWithString: "等待刷新")
+    private let diskUsageValue = NSTextField(labelWithString: "--")
+    private let diskDetailValue = NSTextField(labelWithString: "等待刷新")
     private let loadAverageValue = NSTextField(labelWithString: "--")
 
     private let tokenTotalValue = NSTextField(labelWithString: "0")
@@ -406,6 +464,10 @@ final class DashboardWindowController: NSWindowController {
     private let tokenReadValue = NSTextField(labelWithString: "0")
     private let tokenSavingsRateValue = NSTextField(labelWithString: "0%")
     private let tokenSourceValue = NSTextField(labelWithString: "暂无数据")
+    private let cpuProgress = ProgressBarView(color: Theme.warning)
+    private let memoryProgress = ProgressBarView(color: Theme.accent)
+    private let diskProgress = ProgressBarView(color: NSColor.systemBlue)
+    private let tokenSavingProgress = ProgressBarView(color: Theme.online)
 
     private let languageSegment = NSSegmentedControl(
         labels: ["中文", "English"],
@@ -569,17 +631,28 @@ final class DashboardWindowController: NSWindowController {
     }
 
     func updateSystem(system: SystemStats, tokens: TokenStats, refreshedAt: Date) {
+        topTokenValue.stringValue = formatTokenCount(tokens.totalTokens)
+        topSavingValue.stringValue = "\(tokens.savingsRate)%"
+        topMemoryValue.stringValue = system.memoryUsage
+
+        cpuUsageValue.stringValue = system.cpuUsage
         cpuTempValue.stringValue = system.cpuTemperature
         gpuTempValue.stringValue = system.gpuTemperature
         memoryUsageValue.stringValue = system.memoryUsage
         memoryDetailValue.stringValue = system.memoryDetail
+        diskUsageValue.stringValue = system.diskUsage
+        diskDetailValue.stringValue = system.diskDetail
         loadAverageValue.stringValue = system.loadAverage
+        cpuProgress.value = Double(percentValue(system.cpuUsage))
+        memoryProgress.value = Double(percentValue(system.memoryUsage))
+        diskProgress.value = Double(percentValue(system.diskUsage))
 
         tokenTotalValue.stringValue = formatTokenCount(tokens.totalTokens)
         tokenSavedValue.stringValue = formatTokenCount(tokens.savedTokens)
         tokenReadValue.stringValue = formatTokenCount(tokens.readTokens)
         tokenSavingsRateValue.stringValue = "\(tokens.savingsRate)%"
         tokenSourceValue.stringValue = tokens.sourceBreakdown
+        tokenSavingProgress.value = Double(tokens.savingsRate)
 
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
@@ -669,11 +742,12 @@ final class DashboardWindowController: NSWindowController {
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 13
+        stack.spacing = 9
         stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 14, right: 16)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         stack.addArrangedSubview(systemHeader())
+        stack.addArrangedSubview(systemSummaryStrip())
         stack.addArrangedSubview(systemMetricsCard())
         stack.addArrangedSubview(tokenOverviewCard())
         stack.addArrangedSubview(systemFooter())
@@ -1665,11 +1739,11 @@ final class DashboardWindowController: NSWindowController {
     }
 
     private func systemHeader() -> NSView {
-        let icon = iconTile(symbol: "desktopcomputer", size: 38, symbolSize: 20)
+        let icon = iconTile(symbol: "sparkle", size: 38, symbolSize: 19)
 
-        let title = label("系统与 Token", size: 16, weight: .bold)
+        let title = label("ClaudeMem 监控", size: 16, weight: .bold)
         title.textColor = .labelColor
-        let subtitle = label("本机状态与全平台消耗", size: 11.5, weight: .medium)
+        let subtitle = label("轻量采样 · 本机资源", size: 11.5, weight: .medium)
         subtitle.textColor = .secondaryLabelColor
 
         let copy = NSStackView(views: [title, subtitle])
@@ -1691,75 +1765,86 @@ final class DashboardWindowController: NSWindowController {
         return row
     }
 
+    private func systemSummaryStrip() -> NSView {
+        let tileWidth = (contentWidth - 16) / 3
+        let row = NSStackView(views: [
+            summaryPill(title: "Token", value: topTokenValue, subtitle: "全平台", symbol: "sum", color: Theme.accent, width: tileWidth),
+            summaryPill(title: "节省", value: topSavingValue, subtitle: "记忆压缩", symbol: "leaf", color: Theme.online, width: tileWidth),
+            summaryPill(title: "内存", value: topMemoryValue, subtitle: "当前占用", symbol: "memorychip", color: NSColor.systemBlue, width: tileWidth)
+        ])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
+        return row
+    }
+
     private func systemMetricsCard() -> NSView {
+        configureMetric(cpuUsageValue)
         configureMetric(cpuTempValue)
         configureMetric(gpuTempValue)
         configureMetric(memoryUsageValue)
-        configureMetric(loadAverageValue)
+        configureMetric(diskUsageValue)
         memoryDetailValue.font = .systemFont(ofSize: 10.5, weight: .medium)
         memoryDetailValue.textColor = .tertiaryLabelColor
         memoryDetailValue.maximumNumberOfLines = 1
         memoryDetailValue.lineBreakMode = .byTruncatingTail
-        memoryDetailValue.widthAnchor.constraint(equalToConstant: cardInnerWidth).isActive = true
+        diskDetailValue.font = .systemFont(ofSize: 10.5, weight: .medium)
+        diskDetailValue.textColor = .tertiaryLabelColor
+        diskDetailValue.maximumNumberOfLines = 1
+        diskDetailValue.lineBreakMode = .byTruncatingTail
 
-        let tileWidth = (cardInnerWidth - 8) / 2
+        let tileWidth = (cardInnerWidth - 16) / 3
         let rows = NSStackView(views: [
-            metricRow([
-                metricTile(title: "CPU 温度", value: cpuTempValue, width: tileWidth),
-                metricTile(title: "GPU 温度", value: gpuTempValue, width: tileWidth)
+            resourceRow([
+                resourceTile(title: "CPU", value: cpuUsageValue, detail: loadAverageValue, symbolName: "cpu", bar: cpuProgress, color: Theme.warning, width: tileWidth),
+                resourceTile(title: "内存", value: memoryUsageValue, detail: memoryDetailValue, symbolName: "memorychip", bar: memoryProgress, color: Theme.accent, width: tileWidth),
+                resourceTile(title: "SSD", value: diskUsageValue, detail: diskDetailValue, symbolName: "externaldrive", bar: diskProgress, color: NSColor.systemBlue, width: tileWidth)
             ]),
-            metricRow([
-                metricTile(title: "内存占用", value: memoryUsageValue, width: tileWidth),
-                metricTile(title: "系统负载", value: loadAverageValue, width: tileWidth)
-            ]),
-            memoryDetailValue
+            chipRow([
+                statusChip("CPU \(cpuTempValue.stringValue)", symbolName: "thermometer.medium", color: Theme.warning),
+                statusChip("GPU \(gpuTempValue.stringValue)", symbolName: "display", color: NSColor.systemOrange)
+            ])
         ])
         rows.orientation = .vertical
         rows.alignment = .leading
         rows.spacing = 8
-        return card(title: "电脑状态", symbol: "gauge.with.dots.needle", content: rows)
+        return card(title: "系统资源", symbol: "fan", content: rows)
     }
 
     private func tokenOverviewCard() -> NSView {
-        tokenTotalValue.font = Theme.roundedFont(25, .bold)
+        tokenTotalValue.font = Theme.roundedFont(17, .bold)
         tokenTotalValue.textColor = Theme.accent
-        tokenSavedValue.font = Theme.roundedFont(25, .bold)
+        tokenSavedValue.font = Theme.roundedFont(17, .bold)
         tokenSavedValue.textColor = Theme.online
+        tokenSavingProgress.widthAnchor.constraint(equalToConstant: cardInnerWidth).isActive = true
         configureValue(tokenReadValue, weight: .semibold)
         configureValue(tokenSavingsRateValue, weight: .semibold)
         configureValue(tokenSourceValue, weight: .medium)
         tokenSourceValue.textColor = .secondaryLabelColor
-
-        let total = tokenFigure(title: "总 Token", value: tokenTotalValue, color: Theme.accent)
-        let saved = tokenFigure(title: "已节省", value: tokenSavedValue, color: Theme.online)
-        let topRow = NSStackView(views: [total, saved])
-        topRow.orientation = .horizontal
-        topRow.distribution = .fillEqually
-        topRow.alignment = .centerY
-        topRow.spacing = 10
-        topRow.translatesAutoresizingMaskIntoConstraints = false
-        topRow.widthAnchor.constraint(equalToConstant: cardInnerWidth).isActive = true
-
         let rows = NSStackView(views: [
-            topRow,
+            tokenLine(title: "总 Token", value: tokenTotalValue, color: Theme.accent),
+            tokenLine(title: "已节省", value: tokenSavedValue, color: Theme.online),
+            tokenSavingProgress,
             infoRow(infoCell("读取", tokenReadValue), infoCell("节省", tokenSavingsRateValue)),
             infoCell("来源", tokenSourceValue)
         ])
         rows.orientation = .vertical
         rows.alignment = .leading
-        rows.spacing = 9
-        return card(title: "Token 汇总", symbol: "sum", content: rows)
+        rows.spacing = 7
+        return card(title: "Token 经济", symbol: "chart.line.uptrend.xyaxis", content: rows)
     }
 
     private func configureMetric(_ field: NSTextField) {
-        field.font = Theme.roundedFont(16, .bold)
+        field.font = Theme.roundedFont(15, .bold)
         field.textColor = .labelColor
         field.maximumNumberOfLines = 1
         field.lineBreakMode = .byTruncatingTail
         field.alignment = .left
     }
 
-    private func metricRow(_ tiles: [NSView]) -> NSView {
+    private func resourceRow(_ tiles: [NSView]) -> NSView {
         let row = NSStackView(views: tiles)
         row.orientation = .horizontal
         row.alignment = .centerY
@@ -1769,15 +1854,26 @@ final class DashboardWindowController: NSWindowController {
         return row
     }
 
-    private func metricTile(title: String, value: NSTextField, width: CGFloat) -> NSView {
+    private func resourceTile(title: String, value: NSTextField, detail: NSTextField, symbolName: String, bar: ProgressBarView, color: NSColor, width: CGFloat) -> NSView {
+        let icon = symbol(symbolName, pointSize: 10, weight: .semibold, color: color)
         let titleLabel = label(title, size: 10.5, weight: .semibold)
         titleLabel.textColor = .tertiaryLabelColor
+        let head = NSStackView(views: [icon, titleLabel])
+        head.orientation = .horizontal
+        head.alignment = .centerY
+        head.spacing = 4
 
-        let stack = NSStackView(views: [titleLabel, value])
+        detail.font = .systemFont(ofSize: 8.5, weight: .medium)
+        detail.textColor = .tertiaryLabelColor
+        detail.maximumNumberOfLines = 1
+        detail.lineBreakMode = .byTruncatingTail
+        bar.widthAnchor.constraint(equalToConstant: width - 18).isActive = true
+
+        let stack = NSStackView(views: [head, value, bar, detail])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 3
-        stack.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+        stack.spacing = 4
+        stack.edgeInsets = NSEdgeInsets(top: 8, left: 9, bottom: 8, right: 9)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let view = NSView()
@@ -1797,15 +1893,25 @@ final class DashboardWindowController: NSWindowController {
         return view
     }
 
-    private func tokenFigure(title: String, value: NSTextField, color: NSColor) -> NSView {
-        let titleLabel = label(title, size: 10.5, weight: .semibold)
-        titleLabel.textColor = .secondaryLabelColor
-        value.alignment = .center
+    private func summaryPill(title: String, value: NSTextField, subtitle: String, symbol symbolName: String, color: NSColor, width: CGFloat) -> NSView {
+        value.font = Theme.roundedFont(14, .bold)
+        value.textColor = color
+        let titleLabel = label(title, size: 9, weight: .semibold)
+        titleLabel.textColor = .tertiaryLabelColor
+        let subtitleLabel = label(subtitle, size: 8.5, weight: .medium)
+        subtitleLabel.textColor = .tertiaryLabelColor
+        let icon = symbol(symbolName, pointSize: 10, weight: .semibold, color: color)
 
-        let stack = NSStackView(views: [value, titleLabel])
-        stack.orientation = .vertical
-        stack.alignment = .centerX
-        stack.spacing = 1
+        let text = NSStackView(views: [titleLabel, value, subtitleLabel])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 0
+        let row = NSStackView(views: [icon, text])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        row.edgeInsets = NSEdgeInsets(top: 7, left: 8, bottom: 7, right: 8)
+        row.translatesAutoresizingMaskIntoConstraints = false
 
         let view = NSView()
         view.wantsLayer = true
@@ -1813,17 +1919,65 @@ final class DashboardWindowController: NSWindowController {
         view.layer?.cornerRadius = 11
         view.layer?.cornerCurve = .continuous
         view.translatesAutoresizingMaskIntoConstraints = false
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(stack)
+        view.addSubview(row)
         NSLayoutConstraint.activate([
-            view.heightAnchor.constraint(equalToConstant: 68),
-            stack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            stack.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            stack.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 6),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -6)
+            view.widthAnchor.constraint(equalToConstant: width),
+            row.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            row.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -4),
+            row.topAnchor.constraint(equalTo: view.topAnchor),
+            row.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
         return view
     }
+
+    private func tokenLine(title: String, value: NSTextField, color: NSColor) -> NSView {
+        let titleLabel = label(title, size: 11, weight: .semibold)
+        titleLabel.textColor = .secondaryLabelColor
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let row = NSStackView(views: [titleLabel, spacer, value])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.widthAnchor.constraint(equalToConstant: cardInnerWidth).isActive = true
+        return row
+    }
+
+    private func chipRow(_ chips: [NSView]) -> NSView {
+        let row = NSStackView(views: chips)
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        return row
+    }
+
+    private func statusChip(_ text: String, symbolName: String, color: NSColor) -> NSView {
+        let icon = symbol(symbolName, pointSize: 8.5, weight: .semibold, color: color)
+        let textLabel = label(text, size: 8.8, weight: .bold)
+        textLabel.textColor = color
+        let row = NSStackView(views: [icon, textLabel])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 4
+        row.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        let view = NSView()
+        view.wantsLayer = true
+        view.layer?.backgroundColor = color.withAlphaComponent(0.10).cgColor
+        view.layer?.cornerRadius = 8
+        view.layer?.cornerCurve = .continuous
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            row.topAnchor.constraint(equalTo: view.topAnchor),
+            row.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+        return view
+    }
+
 
     private func actionsCard(
         target: AnyObject,
@@ -2099,6 +2253,11 @@ final class DashboardWindowController: NSWindowController {
         }
         return "\(value)"
     }
+
+    private func percentValue(_ raw: String) -> Int {
+        let digits = raw.prefix { $0.isNumber }
+        return max(0, min(100, Int(digits) ?? 0))
+    }
 }
 
 // MARK: - App
@@ -2120,6 +2279,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastCounts = Counts()
     private var lastSystemStats = SystemStats()
     private var lastTokenStats = TokenStats()
+    private var lastSystemStatsAt = Date.distantPast
+    private var lastTokenStatsAt = Date.distantPast
+    private var lastTemperatureAt = Date.distantPast
+    private var cachedCpuTemperature = "需工具"
+    private var cachedGpuTemperature = "需工具"
+    private var previousCPULoad: host_cpu_load_info_data_t?
     private var lastRefresh = Date()
     private var isRefreshing = false
 
@@ -2183,7 +2348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startTimers() {
         timer?.invalidate()
         updateTimer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             self?.refresh()
         }
         updateTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
@@ -2518,14 +2683,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func fetchSystemStats() -> SystemStats {
+        let now = Date()
+        guard now.timeIntervalSince(lastSystemStatsAt) >= 30 else {
+            return lastSystemStats
+        }
+
         var stats = SystemStats()
+        stats.cpuUsage = readCPUUsage().map { "\($0)%" } ?? lastSystemStats.cpuUsage
         if let memory = readMemoryUsage() {
             stats.memoryUsage = memory.percent
             stats.memoryDetail = memory.detail
         }
+        if let disk = readDiskUsage() {
+            stats.diskUsage = disk.percent
+            stats.diskDetail = disk.detail
+        }
         stats.loadAverage = readLoadAverage() ?? "--"
-        stats.cpuTemperature = readTemperature(kind: .cpu) ?? "不可用"
-        stats.gpuTemperature = readTemperature(kind: .gpu) ?? "不可用"
+        if now.timeIntervalSince(lastTemperatureAt) >= 120 {
+            cachedCpuTemperature = readTemperature(kind: .cpu) ?? "需工具"
+            cachedGpuTemperature = readTemperature(kind: .gpu) ?? "需工具"
+            lastTemperatureAt = now
+        }
+        stats.cpuTemperature = cachedCpuTemperature
+        stats.gpuTemperature = cachedGpuTemperature
+        lastSystemStatsAt = now
         return stats
     }
 
@@ -2571,6 +2752,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             used = total - (freePages * pageSize)
         }
         used = max(0, min(total, used))
+        let percent = Int((Double(used) / Double(total) * 100.0).rounded())
+        return ("\(percent)%", "\(formatBytes(used)) / \(formatBytes(total))")
+    }
+
+    private func readCPUUsage() -> Int? {
+        var load = host_cpu_load_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info_data_t>.stride / MemoryLayout<integer_t>.stride)
+        let result = withUnsafeMutablePointer(to: &load) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+
+        let current = [
+            UInt64(load.cpu_ticks.0),
+            UInt64(load.cpu_ticks.1),
+            UInt64(load.cpu_ticks.2),
+            UInt64(load.cpu_ticks.3)
+        ]
+        let baseline: [UInt64]
+        if let previous = previousCPULoad {
+            baseline = [
+                UInt64(previous.cpu_ticks.0),
+                UInt64(previous.cpu_ticks.1),
+                UInt64(previous.cpu_ticks.2),
+                UInt64(previous.cpu_ticks.3)
+            ]
+        } else {
+            baseline = [0, 0, 0, 0]
+        }
+        previousCPULoad = load
+
+        let diff = zip(current, baseline).map { $0.0 >= $0.1 ? $0.0 - $0.1 : 0 }
+        let idle = diff[Int(CPU_STATE_IDLE)]
+        let total = diff.reduce(0, +)
+        guard total > 0 else { return nil }
+        let used = max(0, min(100, Int(((Double(total - idle) / Double(total)) * 100.0).rounded())))
+        return used
+    }
+
+    private func readDiskUsage() -> (percent: String, detail: String)? {
+        guard let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
+              let total = (attrs[.systemSize] as? NSNumber)?.int64Value,
+              let free = (attrs[.systemFreeSize] as? NSNumber)?.int64Value,
+              total > 0 else {
+            return nil
+        }
+        let used = max(0, total - free)
         let percent = Int((Double(used) / Double(total) * 100.0).rounded())
         return ("\(percent)%", "\(formatBytes(used)) / \(formatBytes(total))")
     }
@@ -2629,6 +2859,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func fetchTokenStats() -> TokenStats {
+        let now = Date()
+        guard now.timeIntervalSince(lastTokenStatsAt) >= 60 else {
+            return lastTokenStats
+        }
+
         var stats = TokenStats()
         guard FileManager.default.fileExists(atPath: databasePath) else {
             return stats
@@ -2695,6 +2930,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if stats.sourceBreakdown.isEmpty, stats.totalTokens > 0 {
             stats.sourceBreakdown = "全平台汇总"
         }
+        lastTokenStatsAt = now
         return stats
     }
 
