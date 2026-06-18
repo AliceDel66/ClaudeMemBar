@@ -7,11 +7,16 @@ private let webURL = URL(string: "http://127.0.0.1:37701")!
 private let healthURL = URL(string: "http://127.0.0.1:37701/api/health")!
 private let databasePath = NSString(string: "~/.claude-mem/claude-mem.db").expandingTildeInPath
 private let settingsPath = NSString(string: "~/.claude-mem/settings.json").expandingTildeInPath
+private let repoRegistryPath = NSString(string: "~/.claude-mem/claudemembar-repos.json").expandingTildeInPath
 private let pluginMarkerPath = NSString(string: "~/.claude/plugins/marketplaces/thedotmack").expandingTildeInPath
 private let logsURL = URL(fileURLWithPath: NSString(string: "~/.claude-mem/logs").expandingTildeInPath)
 private let claudeMemRepoURL = URL(string: "https://github.com/thedotmack/claude-mem")!
 private let nodeDownloadURL = URL(string: "https://nodejs.org/zh-cn/download")!
 private let workerLabel = "com.claude-mem.worker"
+private let repoHarnessBinary = NSString(string: "~/.bun/bin/repo-harness").expandingTildeInPath
+private let defaultHarnessCandidatePath = NSString(
+    string: "~/Documents/Codex/2026-06-18/readme-zh-cn-md-https-github/work/repo-harness"
+).expandingTildeInPath
 
 // GitHub 热更新：版本/源码均来自用户自己的 public 仓库（HTTPS，固定指向）
 private let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0.0"
@@ -67,6 +72,86 @@ struct TokenStats {
     var savingsRate: Int {
         guard totalTokens > 0 else { return 0 }
         return max(0, min(99, Int((Double(savedTokens) / Double(totalTokens) * 100.0).rounded())))
+    }
+}
+
+struct RegisteredRepo: Codable {
+    var name: String
+    var path: String
+    var enabled: Bool
+}
+
+struct RepoRegistry: Codable {
+    var repos: [RegisteredRepo]
+    var activeRepoPath: String?
+}
+
+struct HarnessRepo {
+    var name: String = "未添加 repo"
+    var path: String = ""
+    var branch: String = "--"
+    var isOptedIn: Bool = false
+    var lastModifiedAt: Date?
+}
+
+enum HarnessStatus {
+    case notConfigured
+    case notOptedIn
+    case ready
+    case warning
+    case blocked
+
+    var text: String {
+        switch self {
+        case .notConfigured: return "未添加"
+        case .notOptedIn: return "未接入"
+        case .ready: return "正常"
+        case .warning: return "警告"
+        case .blocked: return "阻塞"
+        }
+    }
+
+    var color: NSColor {
+        switch self {
+        case .ready: return Theme.online
+        case .warning, .notConfigured, .notOptedIn: return Theme.warning
+        case .blocked: return Theme.offline
+        }
+    }
+}
+
+struct HarnessSnapshot {
+    var status: HarnessStatus = .notConfigured
+    var activePlanTitle: String = "暂无 active plan"
+    var activeContractTitle: String = "暂无 active contract"
+    var currentTaskSummary: String = "暂无 current task"
+    var checksStatus: String = "未知"
+    var checksUpdatedAt: Date?
+    var reviewVerdict: String = "暂无 review"
+    var handoffSummary: String = "暂无 handoff"
+    var handoffUpdatedAt: Date?
+    var resumePrompt: String = ""
+}
+
+enum HarnessCommandKind {
+    case status
+    case doctor
+    case dryRun
+
+    var title: String {
+        switch self {
+        case .status: return "状态检查"
+        case .doctor: return "Doctor"
+        case .dryRun: return "Dry Run"
+        }
+    }
+
+    var arguments: [String] {
+        switch self {
+        case .status: return ["status"]
+        case .doctor: return ["doctor"]
+        case .dryRun: return ["adopt", "--dry-run"]
+        }
     }
 }
 
@@ -469,6 +554,20 @@ final class DashboardWindowController: NSWindowController {
     private let diskProgress = ProgressBarView(color: NSColor.systemBlue)
     private let tokenSavingProgress = ProgressBarView(color: Theme.online)
 
+    private let harnessRepoValue = NSTextField(labelWithString: "未添加 repo")
+    private let harnessStatusValue = NSTextField(labelWithString: "未添加")
+    private let harnessBranchValue = NSTextField(labelWithString: "--")
+    private let harnessPlanValue = NSTextField(labelWithString: "暂无 active plan")
+    private let harnessContractValue = NSTextField(labelWithString: "暂无 active contract")
+    private let harnessTaskValue = NSTextField(labelWithString: "暂无 current task")
+    private let harnessChecksValue = NSTextField(labelWithString: "未知")
+    private let harnessCheckTimeValue = NSTextField(labelWithString: "--")
+    private let harnessReviewValue = NSTextField(labelWithString: "暂无 review")
+    private let harnessHandoffValue = NSTextField(labelWithString: "暂无 handoff")
+    private let harnessHandoffTimeValue = NSTextField(labelWithString: "--")
+    private let harnessCommandValue = NSTextField(wrappingLabelWithString: "未运行 repo-harness 命令")
+    private let harnessUpdatedValue = NSTextField(labelWithString: "--")
+
     private let languageSegment = NSSegmentedControl(
         labels: ["中文", "English"],
         trackingMode: .selectOne,
@@ -481,6 +580,7 @@ final class DashboardWindowController: NSWindowController {
     private let blurView = NSVisualEffectView()
     private var dashboardView: NSView!
     private var systemView: NSView!
+    private var harnessView: NSView!
     private var dashboardPage = 0
     private var currentContent: NSView?
     private weak var anchorButton: NSStatusBarButton?
@@ -507,6 +607,13 @@ final class DashboardWindowController: NSWindowController {
     var onRetryInstall: () -> Void = {}
     var languageProvider: () -> Int = { 0 }
     var onSelectLanguage: (Int) -> Void = { _ in }
+    var onAddHarnessRepo: () -> Void = {}
+    var onOpenHarnessRepo: () -> Void = {}
+    var onOpenHarnessHandoff: () -> Void = {}
+    var onOpenHarnessCurrentTask: () -> Void = {}
+    var onCopyHarnessPrompt: () -> Void = {}
+    var onRefreshHarness: () -> Void = {}
+    var onRunHarnessCommand: (HarnessCommandKind) -> Void = { _ in }
 
     // 更新横幅（普通容器：内部按钮需要独立接收点击）
     private let updateBanner = NSView()
@@ -552,6 +659,7 @@ final class DashboardWindowController: NSWindowController {
             quitSelector: quitSelector
         )
         systemView = buildSystemDashboard()
+        harnessView = buildHarnessDashboard()
         container.onHorizontalPageRequest = { [weak self] in
             self?.toggleDashboardPage()
         }
@@ -659,6 +767,27 @@ final class DashboardWindowController: NSWindowController {
         systemUpdatedValue.stringValue = "更新于 \(formatter.string(from: refreshedAt))"
     }
 
+    func updateHarness(repo: HarnessRepo, snapshot: HarnessSnapshot, commandOutput: String, refreshedAt: Date) {
+        harnessRepoValue.stringValue = repo.path.isEmpty ? repo.name : "\(repo.name)"
+        harnessStatusValue.stringValue = snapshot.status.text
+        harnessStatusValue.textColor = snapshot.status.color
+        harnessBranchValue.stringValue = repo.branch
+        harnessPlanValue.stringValue = snapshot.activePlanTitle
+        harnessContractValue.stringValue = snapshot.activeContractTitle
+        harnessTaskValue.stringValue = snapshot.currentTaskSummary
+        harnessChecksValue.stringValue = snapshot.checksStatus
+        harnessChecksValue.textColor = snapshot.status == .blocked ? Theme.offline : (snapshot.status == .warning ? Theme.warning : .labelColor)
+        harnessCheckTimeValue.stringValue = snapshot.checksUpdatedAt.map { formatShortDate($0) } ?? "--"
+        harnessReviewValue.stringValue = snapshot.reviewVerdict
+        harnessHandoffValue.stringValue = snapshot.handoffSummary
+        harnessHandoffTimeValue.stringValue = snapshot.handoffUpdatedAt.map { formatShortDate($0) } ?? "--"
+        harnessCommandValue.stringValue = commandOutput.isEmpty ? "未运行 repo-harness 命令" : commandOutput
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        harnessUpdatedValue.stringValue = "更新于 \(formatter.string(from: refreshedAt))"
+    }
+
     private func position(relativeTo button: NSStatusBarButton) {
         guard let window, let buttonWindow = button.window else {
             window?.center()
@@ -754,10 +883,163 @@ final class DashboardWindowController: NSWindowController {
         return stack
     }
 
+    private func buildHarnessDashboard() -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 9
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 14, right: 16)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        stack.addArrangedSubview(harnessHeader())
+        stack.addArrangedSubview(harnessRepoStrip())
+        stack.addArrangedSubview(harnessCurrentTaskCard())
+        stack.addArrangedSubview(harnessChecksCard())
+        stack.addArrangedSubview(harnessActionsCard())
+        stack.addArrangedSubview(harnessFooter())
+        return stack
+    }
+
+    private func harnessHeader() -> NSView {
+        let icon = iconTile(symbol: "point.3.connected.trianglepath.dotted", size: 38, symbolSize: 20)
+        let title = label("Repo 工作流", size: 18, weight: .bold)
+        title.textColor = .labelColor
+        let subtitle = label("repo-harness 只读快照", size: 11.5, weight: .semibold)
+        subtitle.textColor = .secondaryLabelColor
+        let titleStack = NSStackView(views: [title, subtitle])
+        titleStack.orientation = .vertical
+        titleStack.alignment = .leading
+        titleStack.spacing = 2
+
+        harnessStatusValue.font = .systemFont(ofSize: 11.5, weight: .bold)
+        harnessStatusValue.alignment = .center
+        let statusPill = NSView()
+        statusPill.wantsLayer = true
+        statusPill.layer?.backgroundColor = Theme.accentSoft.cgColor
+        statusPill.layer?.cornerRadius = 12
+        statusPill.layer?.cornerCurve = .continuous
+        statusPill.translatesAutoresizingMaskIntoConstraints = false
+        statusPill.addSubview(harnessStatusValue)
+        harnessStatusValue.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            statusPill.widthAnchor.constraint(equalToConstant: 62),
+            statusPill.heightAnchor.constraint(equalToConstant: 26),
+            harnessStatusValue.centerXAnchor.constraint(equalTo: statusPill.centerXAnchor),
+            harnessStatusValue.centerYAnchor.constraint(equalTo: statusPill.centerYAnchor)
+        ])
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let row = NSStackView(views: [icon, titleStack, spacer, statusPill])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 12
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
+        return row
+    }
+
+    private func harnessRepoStrip() -> NSView {
+        configureValue(harnessRepoValue, weight: .bold)
+        configureValue(harnessBranchValue, weight: .semibold)
+        harnessRepoValue.maximumNumberOfLines = 1
+        harnessBranchValue.textColor = .secondaryLabelColor
+
+        let repoLine = harnessLine("Repo", harnessRepoValue)
+        let branchLine = harnessLine("分支", harnessBranchValue)
+        let stack = NSStackView(views: [repoLine, branchLine])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 5
+        return card(title: "当前仓库", symbol: "shippingbox", content: stack)
+    }
+
+    private func harnessCurrentTaskCard() -> NSView {
+        [harnessPlanValue, harnessContractValue, harnessTaskValue].forEach {
+            configureValue($0, weight: .semibold)
+            $0.maximumNumberOfLines = 1
+        }
+        let stack = NSStackView(views: [
+            harnessLine("计划", harnessPlanValue),
+            harnessLine("契约", harnessContractValue),
+            harnessLine("任务", harnessTaskValue)
+        ])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        return card(title: "当前任务", symbol: "checklist", content: stack)
+    }
+
+    private func harnessChecksCard() -> NSView {
+        [harnessChecksValue, harnessCheckTimeValue, harnessReviewValue, harnessHandoffValue, harnessHandoffTimeValue].forEach {
+            configureValue($0, weight: .semibold)
+            $0.maximumNumberOfLines = 1
+        }
+        harnessCheckTimeValue.textColor = .secondaryLabelColor
+        harnessHandoffTimeValue.textColor = .secondaryLabelColor
+
+        let stack = NSStackView(views: [
+            harnessLine("检查", harnessChecksValue),
+            harnessLine("时间", harnessCheckTimeValue),
+            harnessLine("Review", harnessReviewValue),
+            dividerLine(width: cardInnerWidth),
+            harnessLine("交接", harnessHandoffValue),
+            harnessLine("更新", harnessHandoffTimeValue)
+        ])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 5
+        return card(title: "检查与交接", symbol: "waveform.path.ecg", content: stack)
+    }
+
+    private func harnessActionsCard() -> NSView {
+        let row1 = tileRow([
+            ActionTile(title: "添加", symbol: "plus.square", tint: Theme.accent, target: self, action: #selector(addHarnessRepo)),
+            ActionTile(title: "打开", symbol: "folder", tint: .labelColor, target: self, action: #selector(openHarnessRepo)),
+            ActionTile(title: "Handoff", symbol: "doc.text", tint: .labelColor, target: self, action: #selector(openHarnessHandoff))
+        ])
+        let row2 = tileRow([
+            ActionTile(title: "任务", symbol: "list.bullet.rectangle", tint: .labelColor, target: self, action: #selector(openHarnessCurrentTask)),
+            ActionTile(title: "恢复", symbol: "doc.on.clipboard", tint: Theme.accent, target: self, action: #selector(copyHarnessPrompt)),
+            ActionTile(title: "刷新", symbol: "arrow.clockwise", tint: .labelColor, target: self, action: #selector(refreshHarness))
+        ])
+        let row3 = tileRow([
+            ActionTile(title: "状态", symbol: "stethoscope", tint: .labelColor, target: self, action: #selector(runHarnessStatus)),
+            ActionTile(title: "Doctor", symbol: "cross.case", tint: .labelColor, target: self, action: #selector(runHarnessDoctor)),
+            ActionTile(title: "DryRun", symbol: "play.circle", tint: Theme.warning, target: self, action: #selector(runHarnessDryRun))
+        ])
+
+        configureMultiline(harnessCommandValue, lines: 2, weight: .medium)
+        harnessCommandValue.textColor = .secondaryLabelColor
+        harnessCommandValue.widthAnchor.constraint(equalToConstant: cardInnerWidth).isActive = true
+
+        let rows = NSStackView(views: [row1, row2, row3, dividerLine(width: cardInnerWidth), harnessCommandValue])
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 7
+        return card(title: "快捷操作", symbol: "square.grid.2x2", content: rows)
+    }
+
+    private func harnessFooter() -> NSView {
+        let clock = symbol("clock", pointSize: 11, weight: .regular, color: .tertiaryLabelColor)
+        harnessUpdatedValue.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        harnessUpdatedValue.textColor = .tertiaryLabelColor
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let row = NSStackView(views: [clock, harnessUpdatedValue, spacer, pageDots(active: 2)])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 5
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
+        return row
+    }
+
     // MARK: Navigation
 
     func showDashboard() {
-        let target = dashboardPage == 0 ? dashboardView! : systemView!
+        let target = dashboardView(for: dashboardPage)
         if currentContent === target {
             relayout()
         } else {
@@ -766,9 +1048,17 @@ final class DashboardWindowController: NSWindowController {
     }
 
     private func toggleDashboardPage() {
-        guard currentContent === dashboardView || currentContent === systemView else { return }
-        dashboardPage = dashboardPage == 0 ? 1 : 0
-        swapContent(dashboardPage == 0 ? dashboardView : systemView)
+        guard currentContent === dashboardView || currentContent === systemView || currentContent === harnessView else { return }
+        dashboardPage = (dashboardPage + 1) % 3
+        swapContent(dashboardView(for: dashboardPage))
+    }
+
+    private func dashboardView(for page: Int) -> NSView {
+        switch page {
+        case 1: return systemView
+        case 2: return harnessView
+        default: return dashboardView
+        }
     }
 
     private func swapContent(_ view: NSView) {
@@ -2044,7 +2334,7 @@ final class DashboardWindowController: NSWindowController {
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 5
-        for index in 0..<2 {
+        for index in 0..<3 {
             let dot = NSView()
             dot.wantsLayer = true
             dot.layer?.backgroundColor = (index == active ? Theme.accent : NSColor.tertiaryLabelColor).cgColor
@@ -2058,6 +2348,16 @@ final class DashboardWindowController: NSWindowController {
         }
         return row
     }
+
+    @objc private func addHarnessRepo() { onAddHarnessRepo() }
+    @objc private func openHarnessRepo() { onOpenHarnessRepo() }
+    @objc private func openHarnessHandoff() { onOpenHarnessHandoff() }
+    @objc private func openHarnessCurrentTask() { onOpenHarnessCurrentTask() }
+    @objc private func copyHarnessPrompt() { onCopyHarnessPrompt() }
+    @objc private func refreshHarness() { onRefreshHarness() }
+    @objc private func runHarnessStatus() { onRunHarnessCommand(.status) }
+    @objc private func runHarnessDoctor() { onRunHarnessCommand(.doctor) }
+    @objc private func runHarnessDryRun() { onRunHarnessCommand(.dryRun) }
 
     // MARK: Components
 
@@ -2162,6 +2462,34 @@ final class DashboardWindowController: NSWindowController {
         return row
     }
 
+    private func harnessLine(_ key: String, _ value: NSTextField) -> NSView {
+        let keyLabel = label(key, size: 11.5, weight: .semibold)
+        keyLabel.textColor = .tertiaryLabelColor
+        keyLabel.translatesAutoresizingMaskIntoConstraints = false
+        keyLabel.setContentHuggingPriority(.required, for: .horizontal)
+        keyLabel.widthAnchor.constraint(equalToConstant: 48).isActive = true
+
+        let row = NSStackView(views: [keyLabel, value])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.widthAnchor.constraint(equalToConstant: cardInnerWidth).isActive = true
+        return row
+    }
+
+    private func dividerLine(width: CGFloat) -> NSView {
+        let line = NSView()
+        line.wantsLayer = true
+        line.layer?.backgroundColor = Theme.cardBorder.cgColor
+        line.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            line.widthAnchor.constraint(equalToConstant: width),
+            line.heightAnchor.constraint(equalToConstant: 1)
+        ])
+        return line
+    }
+
     private func tileRow(_ tiles: [ActionTile]) -> NSView {
         let row = NSStackView(views: tiles)
         row.orientation = .horizontal
@@ -2179,6 +2507,14 @@ final class DashboardWindowController: NSWindowController {
         field.font = .systemFont(ofSize: 12.5, weight: weight)
         field.textColor = .labelColor
         field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byTruncatingTail
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    }
+
+    private func configureMultiline(_ field: NSTextField, lines: Int, weight: NSFont.Weight) {
+        field.font = .systemFont(ofSize: 10.5, weight: weight)
+        field.maximumNumberOfLines = lines
         field.lineBreakMode = .byTruncatingTail
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         field.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -2244,6 +2580,16 @@ final class DashboardWindowController: NSWindowController {
         return "\(days) 天 \(hours % 24) 小时"
     }
 
+    private func formatShortDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        if Calendar.current.isDateInToday(date) {
+            formatter.dateFormat = "HH:mm:ss"
+        } else {
+            formatter.dateFormat = "MM-dd HH:mm"
+        }
+        return formatter.string(from: date)
+    }
+
     private func formatTokenCount(_ value: Int) -> String {
         if value >= 100_000_000 {
             return String(format: "%.1f亿", Double(value) / 100_000_000.0)
@@ -2282,6 +2628,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastSystemStatsAt = Date.distantPast
     private var lastTokenStatsAt = Date.distantPast
     private var lastTemperatureAt = Date.distantPast
+    private var lastHarnessRepo = HarnessRepo()
+    private var lastHarnessSnapshot = HarnessSnapshot()
+    private var lastHarnessMtimeKey = ""
+    private var lastHarnessCommandOutput = ""
     private var cachedCpuTemperature = "需工具"
     private var cachedGpuTemperature = "需工具"
     private var previousCPULoad: host_cpu_load_info_data_t?
@@ -2331,6 +2681,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dashboard.onSelectLanguage = { [weak self] index in
             self?.setLanguage(Language(rawValue: index) ?? .chinese)
         }
+        dashboard.onAddHarnessRepo = { [weak self] in self?.addActiveHarnessRepo() }
+        dashboard.onOpenHarnessRepo = { [weak self] in self?.openHarnessRepo() }
+        dashboard.onOpenHarnessHandoff = { [weak self] in self?.openHarnessHandoff() }
+        dashboard.onOpenHarnessCurrentTask = { [weak self] in self?.openHarnessCurrentTask() }
+        dashboard.onCopyHarnessPrompt = { [weak self] in self?.copyHarnessPrompt() }
+        dashboard.onRefreshHarness = { [weak self] in self?.refreshHarnessOnly() }
+        dashboard.onRunHarnessCommand = { [weak self] kind in self?.runHarnessCommand(kind) }
     }
 
     private func buildStatusItem() {
@@ -2589,6 +2946,130 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.terminate(nil)
     }
 
+    private func addActiveHarnessRepo() {
+        let selected = selectedHarnessRepo() ?? candidateHarnessRepo().map { (repo: $0, registered: false) }
+        guard let repo = selected?.repo, !repo.path.isEmpty else {
+            lastHarnessCommandOutput = "未发现可添加的 repo。请先在 \(repoRegistryPath) 配置仓库。"
+            render()
+            return
+        }
+
+        let registered = RegisteredRepo(name: repo.name, path: repo.path, enabled: true)
+        let registry = RepoRegistry(repos: [registered], activeRepoPath: repo.path)
+        if writeRepoRegistry(registry) {
+            lastHarnessCommandOutput = "已添加 repo：\(repo.name)"
+            lastHarnessMtimeKey = ""
+            refreshHarnessOnly()
+        } else {
+            lastHarnessCommandOutput = "写入 repo registry 失败：\(repoRegistryPath)"
+            render()
+        }
+    }
+
+    private func openHarnessRepo() {
+        guard !lastHarnessRepo.path.isEmpty else {
+            lastHarnessCommandOutput = "未添加 repo，无法打开。"
+            render()
+            return
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: lastHarnessRepo.path))
+    }
+
+    private func openHarnessHandoff() {
+        openHarnessFile(".ai/harness/handoff/resume.md", fallback: ".ai/harness/handoff/current.md")
+    }
+
+    private func openHarnessCurrentTask() {
+        openHarnessFile("tasks/current.md", fallback: nil)
+    }
+
+    private func openHarnessFile(_ relativePath: String, fallback: String?) {
+        guard !lastHarnessRepo.path.isEmpty else {
+            lastHarnessCommandOutput = "未添加 repo，无法打开文件。"
+            render()
+            return
+        }
+        let trimmed = relativePath.trimmingCharacters(in: .whitespaces)
+        let primary = lastHarnessRepo.path + "/" + trimmed
+        let fallbackPath = fallback.map { lastHarnessRepo.path + "/" + $0 }
+        let target = FileManager.default.fileExists(atPath: primary) ? primary : fallbackPath
+        guard let target, FileManager.default.fileExists(atPath: target) else {
+            lastHarnessCommandOutput = "文件不存在：\(trimmed)"
+            render()
+            return
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: target))
+    }
+
+    private func copyHarnessPrompt() {
+        let prompt = lastHarnessSnapshot.resumePrompt.isEmpty
+            ? makeResumePrompt(repo: lastHarnessRepo, snapshot: lastHarnessSnapshot)
+            : lastHarnessSnapshot.resumePrompt
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            lastHarnessCommandOutput = "暂无可复制的恢复 Prompt。"
+            render()
+            return
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(prompt, forType: .string)
+        lastHarnessCommandOutput = "恢复 Prompt 已复制到剪贴板。"
+        setTransientStatus("恢复 Prompt 已复制")
+        render()
+    }
+
+    private func refreshHarnessOnly() {
+        DispatchQueue.global(qos: .utility).async {
+            let state = self.fetchHarnessState(force: true)
+            DispatchQueue.main.async {
+                self.lastHarnessRepo = state.repo
+                self.lastHarnessSnapshot = state.snapshot
+                self.lastRefresh = Date()
+                self.render()
+            }
+        }
+    }
+
+    private func runHarnessCommand(_ kind: HarnessCommandKind) {
+        guard !lastHarnessRepo.path.isEmpty else {
+            lastHarnessCommandOutput = "未添加 repo，无法运行 \(kind.title)。"
+            render()
+            return
+        }
+        guard FileManager.default.isExecutableFile(atPath: repoHarnessBinary) else {
+            lastHarnessCommandOutput = "未找到 repo-harness CLI：\(repoHarnessBinary)"
+            render()
+            return
+        }
+
+        let repoPath = lastHarnessRepo.path
+        lastHarnessCommandOutput = "\(kind.title) 运行中…"
+        render()
+
+        DispatchQueue.global(qos: .utility).async {
+            var env = ProcessInfo.processInfo.environment
+            env["PATH"] = "/Users/yaocheng/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:" + (env["PATH"] ?? "")
+            let result = Self.run(repoHarnessBinary, kind.arguments, env: env, cwd: repoPath, timeout: 5)
+            let raw = result.status == 0 ? result.stdout : (result.stderr.isEmpty ? result.stdout : result.stderr)
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let message: String
+            if result.status == -2 {
+                message = "\(kind.title) 超时，已停止。"
+            } else if trimmed.isEmpty {
+                message = "\(kind.title) 完成，退出码 \(result.status)。"
+            } else {
+                message = "\(kind.title): " + String(trimmed.suffix(300))
+            }
+            let state = self.fetchHarnessState(force: true)
+            DispatchQueue.main.async {
+                self.lastHarnessRepo = state.repo
+                self.lastHarnessSnapshot = state.snapshot
+                self.lastHarnessCommandOutput = message
+                self.lastRefresh = Date()
+                self.render()
+            }
+        }
+    }
+
     // MARK: Refresh
 
     private func refresh() {
@@ -2600,6 +3081,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var fetchedCounts = Counts()
         var fetchedSystemStats = SystemStats()
         var fetchedTokenStats = TokenStats()
+        var fetchedHarnessRepo = lastHarnessRepo
+        var fetchedHarnessSnapshot = lastHarnessSnapshot
 
         group.enter()
         fetchHealth { health in
@@ -2620,11 +3103,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             group.leave()
         }
 
+        group.enter()
+        DispatchQueue.global(qos: .utility).async {
+            let harness = self.fetchHarnessState()
+            fetchedHarnessRepo = harness.repo
+            fetchedHarnessSnapshot = harness.snapshot
+            group.leave()
+        }
+
         group.notify(queue: .main) {
             self.lastHealth = fetchedHealth
             self.lastCounts = fetchedCounts
             self.lastSystemStats = fetchedSystemStats
             self.lastTokenStats = fetchedTokenStats
+            self.lastHarnessRepo = fetchedHarnessRepo
+            self.lastHarnessSnapshot = fetchedHarnessSnapshot
             self.lastRefresh = Date()
             self.isRefreshing = false
             self.render()
@@ -2680,6 +3173,378 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         return counts
+    }
+
+    private func fetchHarnessState(force: Bool = false) -> (repo: HarnessRepo, snapshot: HarnessSnapshot) {
+        guard let selection = selectedHarnessRepo() ?? candidateHarnessRepo().map({ (repo: $0, registered: false) }) else {
+            var snapshot = HarnessSnapshot()
+            snapshot.currentTaskSummary = "未配置 repo registry"
+            snapshot.handoffSummary = "在 ~/.claude-mem/claudemembar-repos.json 添加 repo"
+            snapshot.resumePrompt = makeResumePrompt(repo: HarnessRepo(), snapshot: snapshot)
+            return (HarnessRepo(), snapshot)
+        }
+
+        var repo = selection.repo
+        let workflowContract = repo.path + "/.ai/harness/workflow-contract.json"
+        repo.isOptedIn = FileManager.default.fileExists(atPath: workflowContract)
+        repo.lastModifiedAt = harnessLastModified(repoPath: repo.path)
+        let key = harnessMtimeKey(repoPath: repo.path, registered: selection.registered)
+        if !force, !key.isEmpty, key == lastHarnessMtimeKey {
+            return (lastHarnessRepo, lastHarnessSnapshot)
+        }
+        lastHarnessMtimeKey = key
+
+        var snapshot = HarnessSnapshot()
+        if !selection.registered {
+            snapshot.status = .notConfigured
+            snapshot.currentTaskSummary = "发现 repo，可点击「添加」写入 registry"
+        } else if !repo.isOptedIn {
+            snapshot.status = .notOptedIn
+            snapshot.currentTaskSummary = "未发现 .ai/harness/workflow-contract.json"
+            snapshot.handoffSummary = "可运行 Dry Run 查看接入计划"
+            snapshot.resumePrompt = makeResumePrompt(repo: repo, snapshot: snapshot)
+            return (repo, snapshot)
+        } else {
+            snapshot.status = .ready
+        }
+
+        snapshot.activePlanTitle = activePlanTitle(repoPath: repo.path)
+        snapshot.activeContractTitle = activeContractTitle(repoPath: repo.path)
+        snapshot.currentTaskSummary = compactMarkdown(readSmallText(repo.path + "/tasks/current.md") ?? snapshot.currentTaskSummary, limit: 74)
+
+        let checks = checksSnapshot(repoPath: repo.path)
+        snapshot.checksStatus = checks.summary
+        snapshot.checksUpdatedAt = checks.updatedAt
+        if selection.registered, let status = checks.status, statusRank(status) > statusRank(snapshot.status) {
+            snapshot.status = status
+        }
+
+        let review = reviewSnapshot(repoPath: repo.path)
+        snapshot.reviewVerdict = review.summary
+        if selection.registered, let status = review.status, statusRank(status) > statusRank(snapshot.status) {
+            snapshot.status = status
+        }
+
+        let handoff = handoffSnapshot(repoPath: repo.path)
+        snapshot.handoffSummary = handoff.summary
+        snapshot.handoffUpdatedAt = handoff.updatedAt
+        snapshot.resumePrompt = makeResumePrompt(repo: repo, snapshot: snapshot)
+        return (repo, snapshot)
+    }
+
+    private func selectedHarnessRepo() -> (repo: HarnessRepo, registered: Bool)? {
+        guard let registry = readRepoRegistry() else { return nil }
+        let enabled = registry.repos.filter { $0.enabled }
+        guard !enabled.isEmpty else { return nil }
+        let selected = registry.activeRepoPath.flatMap { active in
+            enabled.first { ($0.path as NSString).standardizingPath == (active as NSString).standardizingPath }
+        } ?? enabled.first
+        guard let selected, FileManager.default.fileExists(atPath: selected.path) else { return nil }
+        return (makeHarnessRepo(name: selected.name, path: selected.path), true)
+    }
+
+    private func candidateHarnessRepo() -> HarnessRepo? {
+        let candidates = [
+            defaultHarnessCandidatePath,
+            FileManager.default.currentDirectoryPath
+        ]
+        for path in candidates {
+            let standardPath = (path as NSString).standardizingPath
+            guard FileManager.default.fileExists(atPath: standardPath + "/.git") ||
+                  FileManager.default.fileExists(atPath: standardPath + "/.ai/harness") else { continue }
+            return makeHarnessRepo(name: (standardPath as NSString).lastPathComponent, path: standardPath)
+        }
+        return nil
+    }
+
+    private func makeHarnessRepo(name: String, path: String) -> HarnessRepo {
+        let standardPath = (path as NSString).standardizingPath
+        return HarnessRepo(
+            name: name.isEmpty ? (standardPath as NSString).lastPathComponent : name,
+            path: standardPath,
+            branch: readGitBranch(repoPath: standardPath),
+            isOptedIn: FileManager.default.fileExists(atPath: standardPath + "/.ai/harness/workflow-contract.json"),
+            lastModifiedAt: harnessLastModified(repoPath: standardPath)
+        )
+    }
+
+    private func readRepoRegistry() -> RepoRegistry? {
+        guard let data = FileManager.default.contents(atPath: repoRegistryPath) else { return nil }
+        return try? JSONDecoder().decode(RepoRegistry.self, from: data)
+    }
+
+    @discardableResult
+    private func writeRepoRegistry(_ registry: RepoRegistry) -> Bool {
+        do {
+            let dir = (repoRegistryPath as NSString).deletingLastPathComponent
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(registry)
+            try data.write(to: URL(fileURLWithPath: repoRegistryPath), options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func readGitBranch(repoPath: String) -> String {
+        guard let gitDir = gitDirectory(repoPath: repoPath),
+              let head = readSmallText(gitDir + "/HEAD", maxBytes: 512)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !head.isEmpty else {
+            return "--"
+        }
+        if head.hasPrefix("ref: refs/heads/") {
+            return String(head.dropFirst("ref: refs/heads/".count))
+        }
+        return String(head.prefix(8))
+    }
+
+    private func gitDirectory(repoPath: String) -> String? {
+        let gitPath = repoPath + "/.git"
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: gitPath, isDirectory: &isDir) else { return nil }
+        if isDir.boolValue { return gitPath }
+        guard let text = readSmallText(gitPath, maxBytes: 1024),
+              text.hasPrefix("gitdir:") else { return nil }
+        let raw = text.replacingOccurrences(of: "gitdir:", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.hasPrefix("/") { return raw }
+        return (repoPath as NSString).appendingPathComponent(raw)
+    }
+
+    private func activePlanTitle(repoPath: String) -> String {
+        let marker = repoPath + "/.ai/harness/active-plan"
+        if let target = readSmallText(marker, maxBytes: 2048)
+            .flatMap({ resolveHarnessPath($0, repoPath: repoPath, markerPath: marker) }),
+           FileManager.default.fileExists(atPath: target) {
+            return markdownTitle(path: target, fallback: (target as NSString).lastPathComponent)
+        }
+        if let latest = latestFile(in: repoPath + "/plans", suffix: ".md") {
+            return markdownTitle(path: latest, fallback: (latest as NSString).lastPathComponent)
+        }
+        return "暂无 active plan"
+    }
+
+    private func activeContractTitle(repoPath: String) -> String {
+        if let latest = latestFile(in: repoPath + "/tasks/contracts", suffix: ".md") {
+            return markdownTitle(path: latest, fallback: (latest as NSString).lastPathComponent)
+        }
+        return "暂无 active contract"
+    }
+
+    private func checksSnapshot(repoPath: String) -> (summary: String, status: HarnessStatus?, updatedAt: Date?) {
+        let path = repoPath + "/.ai/harness/checks/latest.json"
+        guard FileManager.default.fileExists(atPath: path) else { return ("暂无 checks", nil, nil) }
+        let updatedAt = fileModifiedAt(path)
+        guard let text = readSmallText(path),
+              let data = text.data(using: .utf8) else { return ("读取失败", .warning, updatedAt) }
+        guard let object = try? JSONSerialization.jsonObject(with: data),
+              let dict = object as? [String: Any] else {
+            return ("latest.json 解析失败", .warning, updatedAt)
+        }
+
+        let rawStatus = firstString(in: dict, keys: ["status", "result", "verdict", "outcome"]) ??
+            firstBool(in: dict, keys: ["ok", "passed", "success"]).map { $0 ? "pass" : "fail" } ??
+            "unknown"
+        let status = classifyHarnessStatus(rawStatus)
+        let runId = firstString(in: dict, keys: ["runId", "id"]).map { " · \($0)" } ?? ""
+        let date = firstDate(in: dict, keys: ["completedAt", "createdAt", "updatedAt", "timestamp", "runAt"]) ?? updatedAt
+        return ("\(rawStatus)\(runId)", status, date)
+    }
+
+    private func reviewSnapshot(repoPath: String) -> (summary: String, status: HarnessStatus?) {
+        let preferred = repoPath + "/tasks/reviews/.review.md"
+        let path = FileManager.default.fileExists(atPath: preferred)
+            ? preferred
+            : latestFile(in: repoPath + "/tasks/reviews", suffix: ".md")
+        guard let path else { return ("暂无 review", nil) }
+        let text = readSmallText(path) ?? ""
+        let summary = compactMarkdown(text, limit: 74)
+        let lowered = text.lowercased()
+        if lowered.contains("blocked") || lowered.contains("fail") || lowered.contains("失败") || lowered.contains("阻塞") {
+            return (summary.isEmpty ? "review 阻塞" : summary, .blocked)
+        }
+        if lowered.contains("warning") || lowered.contains("needs work") || lowered.contains("警告") {
+            return (summary.isEmpty ? "review 警告" : summary, .warning)
+        }
+        return (summary.isEmpty ? "已找到 review" : summary, nil)
+    }
+
+    private func handoffSnapshot(repoPath: String) -> (summary: String, updatedAt: Date?) {
+        let resume = repoPath + "/.ai/harness/handoff/resume.md"
+        let current = repoPath + "/.ai/harness/handoff/current.md"
+        let resumeText = readSmallText(resume)
+        let currentText = readSmallText(current)
+        let summary = compactMarkdown(resumeText ?? currentText ?? "", limit: 74)
+        let updatedAt = [fileModifiedAt(resume), fileModifiedAt(current)].compactMap { $0 }.max()
+        return (summary.isEmpty ? "暂无 handoff" : summary, updatedAt)
+    }
+
+    private func resolveHarnessPath(_ raw: String, repoPath: String, markerPath: String) -> String? {
+        let firstLine = raw.split(separator: "\n").first.map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !firstLine.isEmpty else { return nil }
+        if firstLine.hasPrefix("/") { return firstLine }
+        let rootRelative = (repoPath as NSString).appendingPathComponent(firstLine)
+        if FileManager.default.fileExists(atPath: rootRelative) { return rootRelative }
+        let markerDir = (markerPath as NSString).deletingLastPathComponent
+        return (markerDir as NSString).appendingPathComponent(firstLine)
+    }
+
+    private func markdownTitle(path: String, fallback: String) -> String {
+        guard let text = readSmallText(path) else { return fallback }
+        for raw in text.split(separator: "\n").prefix(20) {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty else { continue }
+            let cleaned = line.replacingOccurrences(of: #"^#+\s*"#, with: "", options: .regularExpression)
+            return String(cleaned.prefix(74))
+        }
+        return fallback
+    }
+
+    private func compactMarkdown(_ text: String, limit: Int) -> String {
+        let cleaned = text
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty && !$0.hasPrefix("```") })?
+            .replacingOccurrences(of: #"^[-*#>\s]+"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return cleaned.isEmpty ? "" : String(cleaned.prefix(limit))
+    }
+
+    private func readSmallText(_ path: String, maxBytes: Int = 16 * 1024) -> String? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        let data = handle.readData(ofLength: maxBytes)
+        try? handle.close()
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func latestFile(in directory: String, suffix: String) -> String? {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory) else { return nil }
+        return names
+            .filter { $0.hasSuffix(suffix) }
+            .map { (directory as NSString).appendingPathComponent($0) }
+            .filter { path in
+                var isDir: ObjCBool = false
+                return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && !isDir.boolValue
+            }
+            .max { (fileModifiedAt($0) ?? .distantPast) < (fileModifiedAt($1) ?? .distantPast) }
+    }
+
+    private func harnessTrackedFiles(repoPath: String) -> [String] {
+        var paths = [
+            repoPath + "/.ai/harness/workflow-contract.json",
+            repoPath + "/.ai/harness/active-plan",
+            repoPath + "/.ai/harness/checks/latest.json",
+            repoPath + "/.ai/harness/handoff/resume.md",
+            repoPath + "/.ai/harness/handoff/current.md",
+            repoPath + "/tasks/current.md"
+        ]
+        if let contract = latestFile(in: repoPath + "/tasks/contracts", suffix: ".md") { paths.append(contract) }
+        if let review = latestFile(in: repoPath + "/tasks/reviews", suffix: ".md") { paths.append(review) }
+        return paths
+    }
+
+    private func harnessMtimeKey(repoPath: String, registered: Bool) -> String {
+        let fragments = harnessTrackedFiles(repoPath: repoPath).map { path in
+            "\(path)=\(fileModifiedAt(path)?.timeIntervalSince1970 ?? 0)"
+        }
+        return "\(registered)|\(repoPath)|" + fragments.joined(separator: "|")
+    }
+
+    private func harnessLastModified(repoPath: String) -> Date? {
+        harnessTrackedFiles(repoPath: repoPath).compactMap { fileModifiedAt($0) }.max()
+    }
+
+    private func fileModifiedAt(_ path: String) -> Date? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }
+        return attrs[.modificationDate] as? Date
+    }
+
+    private func firstString(in dict: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            if let value = dict[key] as? String, !value.isEmpty { return value }
+            if let value = dict[key] as? NSNumber { return value.stringValue }
+        }
+        return nil
+    }
+
+    private func firstBool(in dict: [String: Any], keys: [String]) -> Bool? {
+        for key in keys {
+            if let value = dict[key] as? Bool { return value }
+            if let value = dict[key] as? NSNumber { return value.boolValue }
+        }
+        return nil
+    }
+
+    private func firstDate(in dict: [String: Any], keys: [String]) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let fallback = ISO8601DateFormatter()
+        for key in keys {
+            if let value = dict[key] as? String {
+                if let date = formatter.date(from: value) ?? fallback.date(from: value) { return date }
+            }
+            if let value = dict[key] as? NSNumber {
+                return Date(timeIntervalSince1970: value.doubleValue > 10_000_000_000 ? value.doubleValue / 1000 : value.doubleValue)
+            }
+        }
+        return nil
+    }
+
+    private func classifyHarnessStatus(_ raw: String) -> HarnessStatus? {
+        let status = raw.lowercased()
+        if status.contains("fail") || status.contains("error") || status.contains("blocked") || status.contains("失败") || status.contains("阻塞") {
+            return .blocked
+        }
+        if status.contains("warn") || status.contains("unknown") || status.contains("警告") {
+            return .warning
+        }
+        if status.contains("pass") || status.contains("ok") || status.contains("success") || status.contains("ready") || status.contains("正常") {
+            return .ready
+        }
+        return nil
+    }
+
+    private func statusRank(_ status: HarnessStatus) -> Int {
+        switch status {
+        case .notConfigured: return 0
+        case .notOptedIn: return 1
+        case .ready: return 2
+        case .warning: return 3
+        case .blocked: return 4
+        }
+    }
+
+    private func makeResumePrompt(repo: HarnessRepo, snapshot: HarnessSnapshot) -> String {
+        guard !repo.path.isEmpty else { return "" }
+        let handoffDate = snapshot.handoffUpdatedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "未知"
+        return """
+        你正在接手 repo: \(repo.name)
+        路径: \(repo.path)
+        当前分支: \(repo.branch)
+
+        repo-harness 状态:
+        - Active plan: \(snapshot.activePlanTitle)
+        - Active contract: \(snapshot.activeContractTitle)
+        - Checks: \(snapshot.checksStatus)
+        - Review: \(snapshot.reviewVerdict)
+        - Handoff 更新时间: \(handoffDate)
+
+        请先读取这些文件:
+        1. .ai/harness/handoff/resume.md
+        2. tasks/current.md
+        3. active contract 文件
+        4. .ai/harness/checks/latest.json
+
+        claude-mem 侧建议:
+        - 搜索该 repo 最近记忆
+        - 对照当前 handoff，不要重新推断已有结论
+
+        接下来请先复述当前状态、阻塞点和下一步，不要立即改文件。
+        """
     }
 
     private func fetchSystemStats() -> SystemStats {
@@ -3115,6 +3980,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         dashboard.update(health: lastHealth, counts: lastCounts, refreshedAt: lastRefresh)
         dashboard.updateSystem(system: lastSystemStats, tokens: lastTokenStats, refreshedAt: lastRefresh)
+        dashboard.updateHarness(
+            repo: lastHarnessRepo,
+            snapshot: lastHarnessSnapshot,
+            commandOutput: lastHarnessCommandOutput,
+            refreshedAt: lastRefresh
+        )
     }
 
     private func setTransientStatus(_ title: String) {
@@ -3124,11 +3995,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private static func run(_ executable: String, _ arguments: [String], env: [String: String]? = nil) -> (stdout: String, stderr: String, status: Int32) {
+    private static func run(
+        _ executable: String,
+        _ arguments: [String],
+        env: [String: String]? = nil,
+        cwd: String? = nil,
+        timeout: TimeInterval? = nil
+    ) -> (stdout: String, stderr: String, status: Int32) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         if let env { process.environment = env }
+        if let cwd { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -3137,9 +4015,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             try process.run()
-            process.waitUntilExit()
         } catch {
             return ("", error.localizedDescription, -1)
+        }
+
+        if let timeout {
+            let semaphore = DispatchSemaphore(value: 0)
+            DispatchQueue.global(qos: .utility).async {
+                process.waitUntilExit()
+                semaphore.signal()
+            }
+            if semaphore.wait(timeout: .now() + timeout) == .timedOut {
+                process.terminate()
+                _ = semaphore.wait(timeout: .now() + 1)
+                let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                return (stdout, stderr, -2)
+            }
+        } else {
+            process.waitUntilExit()
         }
 
         let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
