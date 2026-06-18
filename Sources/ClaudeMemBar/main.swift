@@ -423,7 +423,7 @@ final class ClickableView: NSView {
 }
 
 final class PagingHostView: NSView {
-    var onHorizontalPageRequest: (() -> Void)?
+    var onHorizontalPageRequest: ((Int) -> Void)?
     private var accumulatedX: CGFloat = 0
     private var lastTrigger = Date.distantPast
 
@@ -440,8 +440,9 @@ final class PagingHostView: NSView {
         let now = Date()
         if abs(accumulatedX) > 42, now.timeIntervalSince(lastTrigger) > 0.35 {
             lastTrigger = now
+            let direction = accumulatedX > 0 ? 1 : -1
             accumulatedX = 0
-            onHorizontalPageRequest?()
+            onHorizontalPageRequest?(direction)
         }
     }
 
@@ -450,7 +451,8 @@ final class PagingHostView: NSView {
             super.swipe(with: event)
             return
         }
-        onHorizontalPageRequest?()
+        let direction = event.deltaX < 0 ? 1 : -1
+        onHorizontalPageRequest?(direction)
     }
 }
 
@@ -660,8 +662,8 @@ final class DashboardWindowController: NSWindowController {
         )
         systemView = buildSystemDashboard()
         harnessView = buildHarnessDashboard()
-        container.onHorizontalPageRequest = { [weak self] in
-            self?.toggleDashboardPage()
+        container.onHorizontalPageRequest = { [weak self] direction in
+            self?.changeDashboardPage(by: direction)
         }
         panel.contentView = container
         showDashboard()
@@ -1047,9 +1049,9 @@ final class DashboardWindowController: NSWindowController {
         }
     }
 
-    private func toggleDashboardPage() {
+    private func changeDashboardPage(by direction: Int) {
         guard currentContent === dashboardView || currentContent === systemView || currentContent === harnessView else { return }
-        dashboardPage = (dashboardPage + 1) % 3
+        dashboardPage = (dashboardPage + direction + 3) % 3
         swapContent(dashboardView(for: dashboardPage))
     }
 
@@ -3208,8 +3210,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             snapshot.status = .ready
         }
 
-        snapshot.activePlanTitle = activePlanTitle(repoPath: repo.path)
-        snapshot.activeContractTitle = activeContractTitle(repoPath: repo.path)
+        let activePlan = activePlanPath(repoPath: repo.path)
+        let activeContract = activeContractPath(repoPath: repo.path)
+        snapshot.activePlanTitle = activePlanTitle(repoPath: repo.path, path: activePlan)
+        snapshot.activeContractTitle = activeContractTitle(repoPath: repo.path, path: activeContract)
         snapshot.currentTaskSummary = compactMarkdown(readSmallText(repo.path + "/tasks/current.md") ?? snapshot.currentTaskSummary, limit: 74)
 
         let checks = checksSnapshot(repoPath: repo.path)
@@ -3219,7 +3223,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             snapshot.status = status
         }
 
-        let review = reviewSnapshot(repoPath: repo.path)
+        let review = reviewSnapshot(repoPath: repo.path, activeContractPath: activeContract)
         snapshot.reviewVerdict = review.summary
         if selection.registered, let status = review.status, statusRank(status) > statusRank(snapshot.status) {
             snapshot.status = status
@@ -3313,22 +3317,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return (repoPath as NSString).appendingPathComponent(raw)
     }
 
-    private func activePlanTitle(repoPath: String) -> String {
+    private func activePlanPath(repoPath: String) -> String? {
         let marker = repoPath + "/.ai/harness/active-plan"
         if let target = readSmallText(marker, maxBytes: 2048)
             .flatMap({ resolveHarnessPath($0, repoPath: repoPath, markerPath: marker) }),
            FileManager.default.fileExists(atPath: target) {
-            return markdownTitle(path: target, fallback: (target as NSString).lastPathComponent)
+            return target
         }
-        if let latest = latestFile(in: repoPath + "/plans", suffix: ".md") {
-            return markdownTitle(path: latest, fallback: (latest as NSString).lastPathComponent)
+        if let value = activeArtifactValue(repoPath: repoPath, labels: ["Active plan", "Active Plan", "Plan"]),
+           let target = resolveRepoPath(value, repoPath: repoPath),
+           FileManager.default.fileExists(atPath: target) {
+            return target
+        }
+        return nil
+    }
+
+    private func activeContractPath(repoPath: String) -> String? {
+        if let value = activeArtifactValue(repoPath: repoPath, labels: ["Active contract", "Active Contract", "Contract"]),
+           let target = resolveRepoPath(value, repoPath: repoPath),
+           FileManager.default.fileExists(atPath: target) {
+            return target
+        }
+        return nil
+    }
+
+    private func activePlanTitle(repoPath: String, path: String?) -> String {
+        if let path {
+            return markdownTitle(path: path, fallback: (path as NSString).lastPathComponent)
+        }
+        if let value = activeArtifactValue(repoPath: repoPath, labels: ["Active plan", "Active Plan", "Plan"]) {
+            return displayArtifactValue(value)
         }
         return "暂无 active plan"
     }
 
-    private func activeContractTitle(repoPath: String) -> String {
-        if let latest = latestFile(in: repoPath + "/tasks/contracts", suffix: ".md") {
-            return markdownTitle(path: latest, fallback: (latest as NSString).lastPathComponent)
+    private func activeContractTitle(repoPath: String, path: String?) -> String {
+        if let path {
+            return markdownTitle(path: path, fallback: (path as NSString).lastPathComponent)
+        }
+        if let value = activeArtifactValue(repoPath: repoPath, labels: ["Active contract", "Active Contract", "Contract"]) {
+            return displayArtifactValue(value)
         }
         return "暂无 active contract"
     }
@@ -3353,12 +3381,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return ("\(rawStatus)\(runId)", status, date)
     }
 
-    private func reviewSnapshot(repoPath: String) -> (summary: String, status: HarnessStatus?) {
-        let preferred = repoPath + "/tasks/reviews/.review.md"
-        let path = FileManager.default.fileExists(atPath: preferred)
-            ? preferred
-            : latestFile(in: repoPath + "/tasks/reviews", suffix: ".md")
-        guard let path else { return ("暂无 review", nil) }
+    private func reviewSnapshot(repoPath: String, activeContractPath: String?) -> (summary: String, status: HarnessStatus?) {
+        guard let path = activeReviewPath(repoPath: repoPath, activeContractPath: activeContractPath) else {
+            return ("暂无 active review", nil)
+        }
         let text = readSmallText(path) ?? ""
         let summary = compactMarkdown(text, limit: 74)
         let lowered = text.lowercased()
@@ -3369,6 +3395,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return (summary.isEmpty ? "review 警告" : summary, .warning)
         }
         return (summary.isEmpty ? "已找到 review" : summary, nil)
+    }
+
+    private func activeReviewPath(repoPath: String, activeContractPath: String?) -> String? {
+        if let value = activeArtifactValue(repoPath: repoPath, labels: ["Review file", "Review"]),
+           let target = resolveRepoPath(value, repoPath: repoPath),
+           FileManager.default.fileExists(atPath: target) {
+            return target
+        }
+        guard let activeContractPath else { return nil }
+        let filename = (activeContractPath as NSString).lastPathComponent
+            .replacingOccurrences(of: ".contract.md", with: ".review.md")
+        let candidate = repoPath + "/tasks/reviews/" + filename
+        return FileManager.default.fileExists(atPath: candidate) ? candidate : nil
     }
 
     private func handoffSnapshot(repoPath: String) -> (summary: String, updatedAt: Date?) {
@@ -3390,6 +3429,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if FileManager.default.fileExists(atPath: rootRelative) { return rootRelative }
         let markerDir = (markerPath as NSString).deletingLastPathComponent
         return (markerDir as NSString).appendingPathComponent(firstLine)
+    }
+
+    private func resolveRepoPath(_ raw: String, repoPath: String) -> String? {
+        let value = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "`"))
+        guard !value.isEmpty else { return nil }
+        if value.hasPrefix("/") { return value }
+        return (repoPath as NSString).appendingPathComponent(value)
+    }
+
+    private func activeArtifactValue(repoPath: String, labels: [String]) -> String? {
+        let sources = [
+            repoPath + "/.ai/harness/handoff/current.md",
+            repoPath + "/tasks/current.md",
+            repoPath + "/.ai/harness/handoff/resume.md"
+        ]
+        for path in sources {
+            guard let text = readSmallText(path) else { continue }
+            if let value = activeArtifactValue(in: text, labels: labels) {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private func activeArtifactValue(in text: String, labels: [String]) -> String? {
+        for rawLine in text.split(separator: "\n").map(String.init) {
+            let line = rawLine
+                .replacingOccurrences(of: "**", with: "")
+                .replacingOccurrences(of: "`", with: "")
+                .replacingOccurrences(of: #"^[\s>\-*]+"#, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            for label in labels {
+                let prefix = label + ":"
+                if line.range(of: prefix, options: [.caseInsensitive, .anchored]) != nil {
+                    let value = String(line.dropFirst(prefix.count))
+                    if let normalized = normalizeArtifactValue(value) {
+                        return normalized
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    private func normalizeArtifactValue(_ value: String) -> String? {
+        let cleaned = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "`"))
+        let lowered = cleaned.lowercased()
+        if cleaned.isEmpty ||
+            lowered == "(none)" ||
+            lowered == "none" ||
+            lowered == "(no active plan)" ||
+            lowered == "(no active contract)" ||
+            cleaned == "暂无" ||
+            cleaned == "无" {
+            return nil
+        }
+        return cleaned
+    }
+
+    private func displayArtifactValue(_ value: String) -> String {
+        let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.hasPrefix("/") || cleaned.contains("/") {
+            return (cleaned as NSString).lastPathComponent
+        }
+        return cleaned
     }
 
     private func markdownTitle(path: String, fallback: String) -> String {
@@ -3442,8 +3550,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             repoPath + "/.ai/harness/handoff/current.md",
             repoPath + "/tasks/current.md"
         ]
-        if let contract = latestFile(in: repoPath + "/tasks/contracts", suffix: ".md") { paths.append(contract) }
-        if let review = latestFile(in: repoPath + "/tasks/reviews", suffix: ".md") { paths.append(review) }
+        if let plan = activePlanPath(repoPath: repoPath) { paths.append(plan) }
+        if let contract = activeContractPath(repoPath: repoPath) { paths.append(contract) }
+        if let review = activeReviewPath(repoPath: repoPath, activeContractPath: activeContractPath(repoPath: repoPath)) {
+            paths.append(review)
+        }
         return paths
     }
 
