@@ -185,6 +185,8 @@ cat > "$RELEASE_DIR/RELEASE_NOTES.md" <<README
 
 - 首次运行如果未检测到 claude-mem，会自动执行 \`npx claude-mem@latest install\`。
 - 依赖 Node.js 提供 \`npx\`。
+- 菜单面板支持横向滑动切换系统页，展示本机状态与跨 Codex / Claude 来源的 Token 汇总。
+- 温度读取依赖本机可用的 \`osx-cpu-temp\` 或 \`istats\`，不可用时会显示为“不可用”。
 - claude-mem 项目地址：https://github.com/thedotmack/claude-mem
 
 当前安装包未做 Apple notarization；如果 macOS 拦截，请在「系统设置 > 隐私与安全性」里允许打开。

@@ -46,6 +46,26 @@ struct Counts {
     var lastCreatedAt: String?
 }
 
+struct SystemStats {
+    var cpuTemperature: String = "不可用"
+    var gpuTemperature: String = "不可用"
+    var memoryUsage: String = "--"
+    var memoryDetail: String = "等待刷新"
+    var loadAverage: String = "--"
+}
+
+struct TokenStats {
+    var totalTokens: Int = 0
+    var readTokens: Int = 0
+    var savedTokens: Int = 0
+    var sourceBreakdown: String = "暂无数据"
+
+    var savingsRate: Int {
+        guard totalTokens > 0 else { return 0 }
+        return max(0, min(99, Int((Double(savedTokens) / Double(totalTokens) * 100.0).rounded())))
+    }
+}
+
 // 详情列表条目（由 `sqlite3 -json` 解码，字段名对应表列名）
 struct MemoryItem: Decodable {
     let id: Int
@@ -313,6 +333,38 @@ final class ClickableView: NSView {
     }
 }
 
+final class PagingHostView: NSView {
+    var onHorizontalPageRequest: (() -> Void)?
+    private var accumulatedX: CGFloat = 0
+    private var lastTrigger = Date.distantPast
+
+    override func scrollWheel(with event: NSEvent) {
+        let dx = event.scrollingDeltaX
+        let dy = event.scrollingDeltaY
+        guard abs(dx) > abs(dy) * 1.2, abs(dx) > 1 else {
+            accumulatedX = 0
+            super.scrollWheel(with: event)
+            return
+        }
+
+        accumulatedX += dx
+        let now = Date()
+        if abs(accumulatedX) > 42, now.timeIntervalSince(lastTrigger) > 0.35 {
+            lastTrigger = now
+            accumulatedX = 0
+            onHorizontalPageRequest?()
+        }
+    }
+
+    override func swipe(with event: NSEvent) {
+        guard abs(event.deltaX) > abs(event.deltaY), abs(event.deltaX) > 0.2 else {
+            super.swipe(with: event)
+            return
+        }
+        onHorizontalPageRequest?()
+    }
+}
+
 final class FlippedStack: NSStackView {
     override var isFlipped: Bool { true }
 }
@@ -341,6 +393,19 @@ final class DashboardWindowController: NSWindowController {
     private let projectsValue = NSTextField(labelWithString: "暂无")
     private let latestValue = NSTextField(labelWithString: "暂无")
     private let updatedValue = NSTextField(labelWithString: "--")
+    private let systemUpdatedValue = NSTextField(labelWithString: "--")
+
+    private let cpuTempValue = NSTextField(labelWithString: "不可用")
+    private let gpuTempValue = NSTextField(labelWithString: "不可用")
+    private let memoryUsageValue = NSTextField(labelWithString: "--")
+    private let memoryDetailValue = NSTextField(labelWithString: "等待刷新")
+    private let loadAverageValue = NSTextField(labelWithString: "--")
+
+    private let tokenTotalValue = NSTextField(labelWithString: "0")
+    private let tokenSavedValue = NSTextField(labelWithString: "0")
+    private let tokenReadValue = NSTextField(labelWithString: "0")
+    private let tokenSavingsRateValue = NSTextField(labelWithString: "0%")
+    private let tokenSourceValue = NSTextField(labelWithString: "暂无数据")
 
     private let languageSegment = NSSegmentedControl(
         labels: ["中文", "English"],
@@ -350,9 +415,11 @@ final class DashboardWindowController: NSWindowController {
     )
 
     // 内容切换（看板 ⇄ 列表 ⇄ 单条详情 ⇄ 安装引导）
-    private let container = NSView()
+    private let container = PagingHostView()
     private let blurView = NSVisualEffectView()
     private var dashboardView: NSView!
+    private var systemView: NSView!
+    private var dashboardPage = 0
     private var currentContent: NSView?
     private weak var anchorButton: NSStatusBarButton?
     private let detailHeight: CGFloat = 480
@@ -422,6 +489,10 @@ final class DashboardWindowController: NSWindowController {
             logsSelector: logsSelector,
             quitSelector: quitSelector
         )
+        systemView = buildSystemDashboard()
+        container.onHorizontalPageRequest = { [weak self] in
+            self?.toggleDashboardPage()
+        }
         panel.contentView = container
         showDashboard()
     }
@@ -439,6 +510,7 @@ final class DashboardWindowController: NSWindowController {
     func show(health: Health?, counts: Counts, refreshedAt: Date, relativeTo button: NSStatusBarButton) {
         anchorButton = button
         update(health: health, counts: counts, refreshedAt: refreshedAt)
+        dashboardPage = 0
         showDashboard()
         window?.orderFrontRegardless()
     }
@@ -494,6 +566,24 @@ final class DashboardWindowController: NSWindowController {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
         updatedValue.stringValue = "更新于 \(formatter.string(from: refreshedAt))"
+    }
+
+    func updateSystem(system: SystemStats, tokens: TokenStats, refreshedAt: Date) {
+        cpuTempValue.stringValue = system.cpuTemperature
+        gpuTempValue.stringValue = system.gpuTemperature
+        memoryUsageValue.stringValue = system.memoryUsage
+        memoryDetailValue.stringValue = system.memoryDetail
+        loadAverageValue.stringValue = system.loadAverage
+
+        tokenTotalValue.stringValue = formatTokenCount(tokens.totalTokens)
+        tokenSavedValue.stringValue = formatTokenCount(tokens.savedTokens)
+        tokenReadValue.stringValue = formatTokenCount(tokens.readTokens)
+        tokenSavingsRateValue.stringValue = "\(tokens.savingsRate)%"
+        tokenSourceValue.stringValue = tokens.sourceBreakdown
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        systemUpdatedValue.stringValue = "更新于 \(formatter.string(from: refreshedAt))"
     }
 
     private func position(relativeTo button: NSStatusBarButton) {
@@ -575,14 +665,36 @@ final class DashboardWindowController: NSWindowController {
         return stack
     }
 
+    private func buildSystemDashboard() -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 13
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 14, right: 16)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        stack.addArrangedSubview(systemHeader())
+        stack.addArrangedSubview(systemMetricsCard())
+        stack.addArrangedSubview(tokenOverviewCard())
+        stack.addArrangedSubview(systemFooter())
+        return stack
+    }
+
     // MARK: Navigation
 
     func showDashboard() {
-        if currentContent === dashboardView {
+        let target = dashboardPage == 0 ? dashboardView! : systemView!
+        if currentContent === target {
             relayout()
         } else {
-            swapContent(dashboardView)
+            swapContent(target)
         }
+    }
+
+    private func toggleDashboardPage() {
+        guard currentContent === dashboardView || currentContent === systemView else { return }
+        dashboardPage = dashboardPage == 0 ? 1 : 0
+        swapContent(dashboardPage == 0 ? dashboardView : systemView)
     }
 
     private func swapContent(_ view: NSView) {
@@ -1552,6 +1664,167 @@ final class DashboardWindowController: NSWindowController {
         onSelectLanguage(languageSegment.selectedSegment)
     }
 
+    private func systemHeader() -> NSView {
+        let icon = iconTile(symbol: "desktopcomputer", size: 38, symbolSize: 20)
+
+        let title = label("系统与 Token", size: 16, weight: .bold)
+        title.textColor = .labelColor
+        let subtitle = label("本机状态与全平台消耗", size: 11.5, weight: .medium)
+        subtitle.textColor = .secondaryLabelColor
+
+        let copy = NSStackView(views: [title, subtitle])
+        copy.orientation = .vertical
+        copy.alignment = .leading
+        copy.spacing = 1
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let row = NSStackView(views: [icon, copy, spacer, pageDots(active: 1)])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 11
+        row.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            row.widthAnchor.constraint(equalToConstant: contentWidth)
+        ])
+        return row
+    }
+
+    private func systemMetricsCard() -> NSView {
+        configureMetric(cpuTempValue)
+        configureMetric(gpuTempValue)
+        configureMetric(memoryUsageValue)
+        configureMetric(loadAverageValue)
+        memoryDetailValue.font = .systemFont(ofSize: 10.5, weight: .medium)
+        memoryDetailValue.textColor = .tertiaryLabelColor
+        memoryDetailValue.maximumNumberOfLines = 1
+        memoryDetailValue.lineBreakMode = .byTruncatingTail
+        memoryDetailValue.widthAnchor.constraint(equalToConstant: cardInnerWidth).isActive = true
+
+        let tileWidth = (cardInnerWidth - 8) / 2
+        let rows = NSStackView(views: [
+            metricRow([
+                metricTile(title: "CPU 温度", value: cpuTempValue, width: tileWidth),
+                metricTile(title: "GPU 温度", value: gpuTempValue, width: tileWidth)
+            ]),
+            metricRow([
+                metricTile(title: "内存占用", value: memoryUsageValue, width: tileWidth),
+                metricTile(title: "系统负载", value: loadAverageValue, width: tileWidth)
+            ]),
+            memoryDetailValue
+        ])
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 8
+        return card(title: "电脑状态", symbol: "gauge.with.dots.needle", content: rows)
+    }
+
+    private func tokenOverviewCard() -> NSView {
+        tokenTotalValue.font = Theme.roundedFont(25, .bold)
+        tokenTotalValue.textColor = Theme.accent
+        tokenSavedValue.font = Theme.roundedFont(25, .bold)
+        tokenSavedValue.textColor = Theme.online
+        configureValue(tokenReadValue, weight: .semibold)
+        configureValue(tokenSavingsRateValue, weight: .semibold)
+        configureValue(tokenSourceValue, weight: .medium)
+        tokenSourceValue.textColor = .secondaryLabelColor
+
+        let total = tokenFigure(title: "总 Token", value: tokenTotalValue, color: Theme.accent)
+        let saved = tokenFigure(title: "已节省", value: tokenSavedValue, color: Theme.online)
+        let topRow = NSStackView(views: [total, saved])
+        topRow.orientation = .horizontal
+        topRow.distribution = .fillEqually
+        topRow.alignment = .centerY
+        topRow.spacing = 10
+        topRow.translatesAutoresizingMaskIntoConstraints = false
+        topRow.widthAnchor.constraint(equalToConstant: cardInnerWidth).isActive = true
+
+        let rows = NSStackView(views: [
+            topRow,
+            infoRow(infoCell("读取", tokenReadValue), infoCell("节省", tokenSavingsRateValue)),
+            infoCell("来源", tokenSourceValue)
+        ])
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 9
+        return card(title: "Token 汇总", symbol: "sum", content: rows)
+    }
+
+    private func configureMetric(_ field: NSTextField) {
+        field.font = Theme.roundedFont(16, .bold)
+        field.textColor = .labelColor
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byTruncatingTail
+        field.alignment = .left
+    }
+
+    private func metricRow(_ tiles: [NSView]) -> NSView {
+        let row = NSStackView(views: tiles)
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.widthAnchor.constraint(equalToConstant: cardInnerWidth).isActive = true
+        return row
+    }
+
+    private func metricTile(title: String, value: NSTextField, width: CGFloat) -> NSView {
+        let titleLabel = label(title, size: 10.5, weight: .semibold)
+        titleLabel.textColor = .tertiaryLabelColor
+
+        let stack = NSStackView(views: [titleLabel, value])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 3
+        stack.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let view = NSView()
+        view.wantsLayer = true
+        view.layer?.backgroundColor = Theme.controlFill.cgColor
+        view.layer?.cornerRadius = 10
+        view.layer?.cornerCurve = .continuous
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            view.widthAnchor.constraint(equalToConstant: width),
+            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: view.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+        return view
+    }
+
+    private func tokenFigure(title: String, value: NSTextField, color: NSColor) -> NSView {
+        let titleLabel = label(title, size: 10.5, weight: .semibold)
+        titleLabel.textColor = .secondaryLabelColor
+        value.alignment = .center
+
+        let stack = NSStackView(views: [value, titleLabel])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 1
+
+        let view = NSView()
+        view.wantsLayer = true
+        view.layer?.backgroundColor = color.withAlphaComponent(0.10).cgColor
+        view.layer?.cornerRadius = 11
+        view.layer?.cornerCurve = .continuous
+        view.translatesAutoresizingMaskIntoConstraints = false
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            view.heightAnchor.constraint(equalToConstant: 68),
+            stack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 6),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -6)
+        ])
+        return view
+    }
+
     private func actionsCard(
         target: AnyObject,
         openSelector: Selector,
@@ -1583,7 +1856,9 @@ final class DashboardWindowController: NSWindowController {
         updatedValue.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         updatedValue.textColor = .tertiaryLabelColor
 
-        let row = NSStackView(views: [clock, updatedValue])
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let row = NSStackView(views: [clock, updatedValue, spacer, pageDots(active: 0)])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 5
@@ -1591,6 +1866,42 @@ final class DashboardWindowController: NSWindowController {
         NSLayoutConstraint.activate([
             row.widthAnchor.constraint(equalToConstant: contentWidth)
         ])
+        return row
+    }
+
+    private func systemFooter() -> NSView {
+        let clock = symbol("clock", pointSize: 11, weight: .regular, color: .tertiaryLabelColor)
+        systemUpdatedValue.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        systemUpdatedValue.textColor = .tertiaryLabelColor
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let row = NSStackView(views: [clock, systemUpdatedValue, spacer, pageDots(active: 1)])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 5
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
+        return row
+    }
+
+    private func pageDots(active: Int) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 5
+        for index in 0..<2 {
+            let dot = NSView()
+            dot.wantsLayer = true
+            dot.layer?.backgroundColor = (index == active ? Theme.accent : NSColor.tertiaryLabelColor).cgColor
+            dot.layer?.cornerRadius = 3
+            dot.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                dot.widthAnchor.constraint(equalToConstant: index == active ? 14 : 6),
+                dot.heightAnchor.constraint(equalToConstant: 6)
+            ])
+            row.addArrangedSubview(dot)
+        }
         return row
     }
 
@@ -1778,6 +2089,16 @@ final class DashboardWindowController: NSWindowController {
         let days = hours / 24
         return "\(days) 天 \(hours % 24) 小时"
     }
+
+    private func formatTokenCount(_ value: Int) -> String {
+        if value >= 100_000_000 {
+            return String(format: "%.1f亿", Double(value) / 100_000_000.0)
+        }
+        if value >= 10_000 {
+            return String(format: "%.1f万", Double(value) / 10_000.0)
+        }
+        return "\(value)"
+    }
 }
 
 // MARK: - App
@@ -1797,6 +2118,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var updateTimer: Timer?
     private var lastHealth: Health?
     private var lastCounts = Counts()
+    private var lastSystemStats = SystemStats()
+    private var lastTokenStats = TokenStats()
     private var lastRefresh = Date()
     private var isRefreshing = false
 
@@ -2110,6 +2433,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let group = DispatchGroup()
         var fetchedHealth: Health?
         var fetchedCounts = Counts()
+        var fetchedSystemStats = SystemStats()
+        var fetchedTokenStats = TokenStats()
 
         group.enter()
         fetchHealth { health in
@@ -2123,9 +2448,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             group.leave()
         }
 
+        group.enter()
+        DispatchQueue.global(qos: .utility).async {
+            fetchedSystemStats = self.fetchSystemStats()
+            fetchedTokenStats = self.fetchTokenStats()
+            group.leave()
+        }
+
         group.notify(queue: .main) {
             self.lastHealth = fetchedHealth
             self.lastCounts = fetchedCounts
+            self.lastSystemStats = fetchedSystemStats
+            self.lastTokenStats = fetchedTokenStats
             self.lastRefresh = Date()
             self.isRefreshing = false
             self.render()
@@ -2181,6 +2515,210 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         return counts
+    }
+
+    private func fetchSystemStats() -> SystemStats {
+        var stats = SystemStats()
+        if let memory = readMemoryUsage() {
+            stats.memoryUsage = memory.percent
+            stats.memoryDetail = memory.detail
+        }
+        stats.loadAverage = readLoadAverage() ?? "--"
+        stats.cpuTemperature = readTemperature(kind: .cpu) ?? "不可用"
+        stats.gpuTemperature = readTemperature(kind: .gpu) ?? "不可用"
+        return stats
+    }
+
+    private enum TemperatureKind {
+        case cpu
+        case gpu
+    }
+
+    private func readMemoryUsage() -> (percent: String, detail: String)? {
+        let totalOutput = Self.run("/usr/sbin/sysctl", ["-n", "hw.memsize"]).stdout
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let total = Int64(totalOutput), total > 0 else { return nil }
+
+        let vmOutput = Self.run("/usr/bin/vm_stat", []).stdout
+        guard !vmOutput.isEmpty else { return nil }
+
+        var pageSize: Int64 = 4096
+        var pages: [String: Int64] = [:]
+        for line in vmOutput.split(separator: "\n").map(String.init) {
+            if line.contains("page size of"),
+               let range = line.range(of: #"page size of\s+([0-9]+)"#, options: .regularExpression) {
+                let fragment = String(line[range])
+                if let value = fragment.split(separator: " ").last.flatMap({ Int64($0) }) {
+                    pageSize = value
+                }
+                continue
+            }
+            let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { continue }
+            let key = String(parts[0])
+            let digits = parts[1].filter { $0.isNumber }
+            if let value = Int64(String(digits)) {
+                pages[key] = value
+            }
+        }
+
+        let activePages = pages["Pages active"] ?? 0
+        let wiredPages = pages["Pages wired down"] ?? 0
+        let compressedPages = pages["Pages occupied by compressor"] ?? 0
+        var used = (activePages + wiredPages + compressedPages) * pageSize
+        if used <= 0 {
+            let freePages = (pages["Pages free"] ?? 0) + (pages["Pages speculative"] ?? 0)
+            used = total - (freePages * pageSize)
+        }
+        used = max(0, min(total, used))
+        let percent = Int((Double(used) / Double(total) * 100.0).rounded())
+        return ("\(percent)%", "\(formatBytes(used)) / \(formatBytes(total))")
+    }
+
+    private func readLoadAverage() -> String? {
+        let output = Self.run("/usr/sbin/sysctl", ["-n", "vm.loadavg"]).stdout
+            .replacingOccurrences(of: "{", with: "")
+            .replacingOccurrences(of: "}", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let values = output.split(separator: " ").prefix(3).map(String.init)
+        return values.isEmpty ? nil : values.joined(separator: " / ")
+    }
+
+    private func readTemperature(kind: TemperatureKind) -> String? {
+        switch kind {
+        case .cpu:
+            if let path = findExecutable(named: "osx-cpu-temp") {
+                return parseTemperature(Self.run(path, []).stdout)
+            }
+            if let path = findExecutable(named: "istats") {
+                return parseTemperature(Self.run(path, ["cpu", "temp"]).stdout)
+            }
+        case .gpu:
+            if let path = findExecutable(named: "istats") {
+                return parseTemperature(Self.run(path, ["gpu", "temp"]).stdout)
+                    ?? parseTemperature(Self.run(path, ["scan"]).stdout)
+            }
+        }
+        return nil
+    }
+
+    private func parseTemperature(_ text: String) -> String? {
+        guard let range = text.range(of: #"[-+]?[0-9]+(\.[0-9]+)?"#, options: .regularExpression),
+              let value = Double(text[range]) else {
+            return nil
+        }
+        if value <= 0 { return nil }
+        return value.rounded() == value ? "\(Int(value))°C" : String(format: "%.1f°C", value)
+    }
+
+    private func findExecutable(named name: String) -> String? {
+        let candidates = [
+            "/opt/homebrew/bin/\(name)",
+            "/usr/local/bin/\(name)",
+            "/usr/bin/\(name)",
+            "/bin/\(name)"
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    private func formatBytes(_ value: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .memory
+        formatter.allowedUnits = [.useGB, .useMB]
+        return formatter.string(fromByteCount: value)
+    }
+
+    private func fetchTokenStats() -> TokenStats {
+        var stats = TokenStats()
+        guard FileManager.default.fileExists(atPath: databasePath) else {
+            return stats
+        }
+
+        let sql = """
+        select 'work|' || (
+            (select coalesce(sum(discovery_tokens), 0) from observations) +
+            (select coalesce(sum(discovery_tokens), 0) from session_summaries)
+        );
+        select 'chars|' || (
+            (select coalesce(sum(
+                length(coalesce(title, '')) +
+                length(coalesce(subtitle, '')) +
+                length(coalesce(facts, '')) +
+                length(coalesce(narrative, '')) +
+                length(coalesce(concepts, '')) +
+                length(coalesce(text, ''))
+            ), 0) from observations) +
+            (select coalesce(sum(
+                length(coalesce(request, '')) +
+                length(coalesce(investigated, '')) +
+                length(coalesce(learned, '')) +
+                length(coalesce(completed, '')) +
+                length(coalesce(next_steps, '')) +
+                length(coalesce(notes, ''))
+            ), 0) from session_summaries)
+        );
+        select 'source|' || coalesce(s.platform_source, 'unknown') || '|' || coalesce(sum(t.tokens), 0)
+        from (
+            select memory_session_id, discovery_tokens as tokens from observations
+            union all
+            select memory_session_id, discovery_tokens as tokens from session_summaries
+        ) t
+        left join sdk_sessions s on s.memory_session_id = t.memory_session_id
+        group by coalesce(s.platform_source, 'unknown')
+        order by sum(t.tokens) desc;
+        """
+
+        var sources: [(String, Int)] = []
+        let output = Self.run("/usr/bin/sqlite3", [databasePath, sql]).stdout
+        for line in output.split(separator: "\n").map(String.init) {
+            let parts = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+            guard let key = parts.first else { continue }
+            switch key {
+            case "work":
+                stats.totalTokens = Int(parts.dropFirst().first ?? "0") ?? 0
+            case "chars":
+                let chars = Int(parts.dropFirst().first ?? "0") ?? 0
+                stats.readTokens = max(0, chars / 4)
+            case "source":
+                guard parts.count >= 3 else { continue }
+                sources.append((parts[1], Int(parts[2]) ?? 0))
+            default:
+                continue
+            }
+        }
+        stats.savedTokens = max(0, stats.totalTokens - stats.readTokens)
+        stats.sourceBreakdown = sources
+            .filter { $0.1 > 0 }
+            .prefix(4)
+            .map { "\(displayPlatform($0.0)) \(compactNumber($0.1))" }
+            .joined(separator: " · ")
+        if stats.sourceBreakdown.isEmpty, stats.totalTokens > 0 {
+            stats.sourceBreakdown = "全平台汇总"
+        }
+        return stats
+    }
+
+    private func displayPlatform(_ source: String) -> String {
+        switch source.lowercased() {
+        case "codex":
+            return "Codex"
+        case "claude":
+            return "Claude"
+        case "unknown":
+            return "历史"
+        default:
+            return source.isEmpty ? "未知" : source
+        }
+    }
+
+    private func compactNumber(_ value: Int) -> String {
+        if value >= 100_000_000 {
+            return String(format: "%.1f亿", Double(value) / 100_000_000.0)
+        }
+        if value >= 10_000 {
+            return String(format: "%.1f万", Double(value) / 10_000.0)
+        }
+        return "\(value)"
     }
 
     // MARK: Detail data (Req2: 异步加载 + 缓存)
@@ -2340,6 +2878,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.toolTip = "\(appName): \(statusText)"
         }
         dashboard.update(health: lastHealth, counts: lastCounts, refreshedAt: lastRefresh)
+        dashboard.updateSystem(system: lastSystemStats, tokens: lastTokenStats, refreshedAt: lastRefresh)
     }
 
     private func setTransientStatus(_ title: String) {
