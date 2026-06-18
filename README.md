@@ -20,11 +20,22 @@ ClaudeMemBar 是一个轻量级 macOS 顶部菜单栏看板，用来快速查看
 - 首次运行若未检测到 claude-mem，自动安装并启动后再进入面板
 - 自动检测 GitHub 新版本并一键更新（非强制）
 
+## 快速安装
+
+打开 [GitHub Releases](https://github.com/AliceDel66/ClaudeMemBar/releases/latest)，下载最新版本安装包：
+
+- 推荐：`ClaudeMemBar-x.y.z.pkg`，双击安装
+- 备用：`ClaudeMemBar-x.y.z-macOS.zip`，解压后运行 `install.command`
+
+安装完成后，macOS 顶部菜单栏会出现 `记忆`。首次运行如果未检测到 claude-mem，ClaudeMemBar 会自动执行 `npx claude-mem@latest install` 并启动后台服务。
+
+当前安装包未做 Apple notarization；如果 macOS 拦截，请在「系统设置 > 隐私与安全性」里允许打开，或右键安装文件选择「打开」。
+
 ## 依赖
 
 - macOS 13 或更新版本
-- Swift 编译器和 AppKit
 - Node.js（提供 `npx`，用于在缺失时自动安装 claude-mem）
+- 从源码构建时需要 Swift 编译器和 AppKit
 
 首次启动时，如果未检测到 claude-mem，应用会自动执行：
 
@@ -63,7 +74,7 @@ https://github.com/thedotmack/claude-mem
 dist/ClaudeMemBar.app
 ```
 
-## 安装到本机
+## 本地开发安装
 
 ```sh
 ./scripts/install.sh
@@ -75,6 +86,26 @@ dist/ClaudeMemBar.app
 2. 安装到 `~/Applications/ClaudeMemBar.app`
 3. 写入 `~/Library/LaunchAgents/local.claude-mem-bar.plist`
 4. 通过 launchd 启动菜单栏应用
+
+## 制作 Release 安装包
+
+```sh
+./scripts/package-release.sh
+```
+
+脚本会生成：
+
+```text
+dist/release/ClaudeMemBar-x.y.z.pkg
+dist/release/ClaudeMemBar-x.y.z-macOS.zip
+```
+
+推送 `v*` tag 后，GitHub Actions 会自动构建这些安装包并上传到 GitHub Release：
+
+```sh
+git tag v1.1.0
+git push origin v1.1.0
+```
 
 ## 使用
 
